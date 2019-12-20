@@ -281,6 +281,10 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
     AVFrame *out;
     int ret = 0;
 
+    //TODO:eagle should add
+    //add the unsharp_value
+    //example:s->lamount = unsharp_value;
+
     out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
     if (!out) {
         av_frame_free(&in);

@@ -104,6 +104,7 @@
 #include "ffmpeg.h"
 #include "cmdutils.h"
 
+
 #include "libavutil/avassert.h"
 
 const char program_name[] = "ffmpeg";
@@ -1284,6 +1285,12 @@ static void do_video_out(OutputFile *of,
         }
 
         ost->frames_encoded++;
+
+        //TODO:eagle should add
+        //reconfig encoder params(aq_strength, crf), using the x264_encoder_reconfig
+        //example: X264Context *x4 = enc->priv_data;
+        //x4->params.rc_f_rf_constant = x4->crf = crx_value;
+        //x4->params.rc_f_aq_strength = x4->aq_strength = aq_strength_value;
 
         ret = avcodec_send_frame(enc, in_picture);
         if (ret < 0)
