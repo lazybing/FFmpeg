@@ -4838,6 +4838,11 @@ static void log_callback_null(void *ptr, int level, const char *fmt, va_list vl)
 {
 }
 
+#define MAX_MATRIX_SIZE 63
+#define FHD_BUFFER_SIZE 0x9450C00 //1920*1080*50*3/2
+uint8_t VideoBuffer[FHD_BUFFER_SIZE];
+int framenum = 0;
+
 typedef struct InputParams {
     char *src_filename;
     char *video_dst_filename;
@@ -4871,9 +4876,57 @@ typedef struct DecodeInfo {
     enum AVPixelFormat pix_fmt;
 } DecodeInfo;
 
+static long long get_unsharp_val(uint8_t *data, int width, int height, double amounts, int msize_x, int msize_y)
+{
+    int tmp1, tmp2;
+    int res;
+    long long sharpness = 0;
+    const int amount = amounts * 65536;
+    const int steps_x = msize_x >> 1;
+    const int steps_y = msize_y >> 1;
+    const int32_t scalebits = (steps_x + steps_y) * 2;
+    const int32_t halfscale = 1 << (scalebits - 1);
+
+    uint32_t *sc[MAX_MATRIX_SIZE - 1] = {NULL};
+
+    for (int z = 0; z < 2 * steps_y; z++) {
+        sc[z] = (uint32_t *)malloc((width + 2 * steps_x) * sizeof(uint32_t));
+        memset(sc[z], 0, sizeof(sc[z][0]) * (width + 2 * steps_x));
+    }
+
+    //y from 1 not -steps_y
+    //x from 1 not -steps_x
+    for (int y = steps_y; y < height - 1; y++) {
+        uint32_t sr[MAX_MATRIX_SIZE - 1] = {0};
+        for (int x = steps_x; x < width - 1; x++) {
+            tmp1 = data[y * width + x];
+            for (int z = 0; z < steps_x * 2; z += 2) {
+                tmp2 = sr[z + 0] + tmp1;
+                sr[z + 0] = tmp1;
+                tmp1 = sr[z + 1] + tmp2;
+                sr[z + 1] = tmp2;
+            }
+
+            for (int z = 0; z < steps_y * 2; z += 2) {
+                tmp2 = sc[z + 0][x + steps_x] + tmp1;
+                sc[z + 0][x + steps_x] = tmp1;
+                tmp1 = sc[z + 1][x + steps_x] + tmp2;
+                sc[z + 1][x + steps_x] = tmp2;
+            }
+
+            /*res = data[y * width + x] + (((data[y * height + x] - (int32_t)((tmp1 + halfscale) >> scalebits)) * amount) >> 16);*/
+            res = ((data[y * width + x] - (int32_t)((tmp1 + halfscale) >> scalebits)) * amount) >> 16;
+            sharpness += res;
+        }
+    }
+
+    return sharpness;
+}
+
 static int decode_packet(InputStreamInfo *p_input_stream_info, DecodeInfo *p_dec_info, InputParams *p_input_par)
 {
     int ret = 0;
+    long long sharpness;
     AVPacket *p_pkt = p_pkt = p_input_stream_info->p_pkt;
 
     while (av_read_frame(p_input_stream_info->p_fmt_ctx, p_pkt) <= 0) {
@@ -4893,13 +4946,26 @@ static int decode_packet(InputStreamInfo *p_input_stream_info, DecodeInfo *p_dec
                         fprintf(stderr, "ProgEagle: Error during decoding\n");
                         break;
                     }
-                    fprintf(stdout, "framenum %d\n", p_input_stream_info->p_frame->coded_picture_number);
+                    //fprintf(stdout, "framenum %d\n", p_input_stream_info->p_frame->coded_picture_number);
 
                     av_image_copy(p_dec_info->video_dst_data, p_dec_info->video_dst_linesize,
                                 (const uint8_t *)(p_input_stream_info->p_frame->data),
                                 p_input_stream_info->p_frame->linesize,
                                 p_dec_info->pix_fmt, p_dec_info->width, p_dec_info->height);
+
+                    sharpness = get_unsharp_val(p_dec_info->video_dst_data[0],
+                                    p_dec_info->width, p_dec_info->height, 1.0, 5, 5);
                     //fwrite(p_dec_info->video_dst_data[0], 1, p_dec_info->video_dst_bufsize, p_input_par->video_dst_file);
+                    if (framenum <= 50) {
+                        memcpy(VideoBuffer + framenum * p_dec_info->width * p_dec_info->height * 3 / 2,
+                            p_dec_info->video_dst_data[0],  p_dec_info->width * p_dec_info->height * 3 / 2);
+                        //FILE *fp = fopen("./videobuffer.yuv", "wb");
+                        //fwrite(VideoBuffer, 1, framenum * p_dec_info->width * p_dec_info->height * 3 / 2, fp);
+                        //fclose(fp);
+                        //getchar();
+                        return 0;
+                    }
+                    framenum++;
                     break;
                 }
             }else if (p_pkt->stream_index == p_input_stream_info->audio_stream_idx) {
@@ -5045,14 +5111,14 @@ static int get_input_fmt(InputStreamInfo **pp_input_stream_info, char *filename)
 }
 
 //decode the mp4 format h264 codec to yuv,
-static void FristPartofPreProcess(char *filename)
+static int FristPartofPreProcess(char *filename)
 {
     int ret = -1;
     int video_stream_idx = -1, audio_stream_idx = -1;
 
     DecodeInfo decinfo;
     InputParams inputpar;
-    inputpar.video_dst_file = (FILE *)fopen("./output.bin", "wb");
+    inputpar.video_dst_file = (FILE *)fopen("./output.yuv", "wb");
 
     InputStreamInfo *p_input_stream_info = (InputStreamInfo *)malloc(sizeof(InputStreamInfo));
     if (!p_input_stream_info) {
