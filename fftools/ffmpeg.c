@@ -4838,10 +4838,263 @@ static void log_callback_null(void *ptr, int level, const char *fmt, va_list vl)
 {
 }
 
+typedef struct InputParams {
+    char *src_filename;
+    char *video_dst_filename;
+    char *audio_dst_filename;
+    FILE *src_file;
+    FILE *video_dst_file;
+    FILE *audio_dst_file;
+}InputParams;
+
+typedef struct InputStreamInfo {
+    AVPacket                *p_pkt;
+    AVFrame               *p_frame;
+    AVFormatContext     *p_fmt_ctx;
+    AVStream            *p_video_stream;
+    AVStream            *p_audio_stream;
+    AVCodec             *p_video_codec;
+    AVCodec             *p_audio_codec;
+    AVCodecContext      *p_video_codecctx;
+    AVCodecContext      *p_audio_codecctx;
+    AVCodecParameters   *p_video_codec_par;
+    AVCodecParameters   *p_audio_codec_par;
+    int                 width, height;
+    int video_stream_idx, audio_stream_idx;
+}InputStreamInfo;
+
+typedef struct DecodeInfo {
+    int width, height;
+    uint8_t *video_dst_data[4];
+    int video_dst_linesize[4];
+    int video_dst_bufsize;
+    enum AVPixelFormat pix_fmt;
+} DecodeInfo;
+
+static int decode_packet(InputStreamInfo *p_input_stream_info, DecodeInfo *p_dec_info, InputParams *p_input_par)
+{
+    int ret = 0;
+    AVPacket *p_pkt = p_pkt = p_input_stream_info->p_pkt;
+
+    while (av_read_frame(p_input_stream_info->p_fmt_ctx, p_pkt) <= 0) {
+        do {
+            if (p_pkt->stream_index == p_input_stream_info->video_stream_idx) {
+                ret = avcodec_send_packet(p_input_stream_info->p_video_codecctx, p_pkt);
+                if (ret != 0) {
+                    fprintf(stderr, "ProgEagle: Error sending a packet for decoding\n");
+                    return ret;
+                }
+
+                while (ret >= 0) {
+                    ret = avcodec_receive_frame(p_input_stream_info->p_video_codecctx, p_input_stream_info->p_frame);
+                    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                        break;
+                    } else if (ret < 0) {
+                        fprintf(stderr, "ProgEagle: Error during decoding\n");
+                        break;
+                    }
+                    fprintf(stdout, "framenum %d\n", p_input_stream_info->p_frame->coded_picture_number);
+
+                    av_image_copy(p_dec_info->video_dst_data, p_dec_info->video_dst_linesize,
+                                (const uint8_t *)(p_input_stream_info->p_frame->data),
+                                p_input_stream_info->p_frame->linesize,
+                                p_dec_info->pix_fmt, p_dec_info->width, p_dec_info->height);
+                    //fwrite(p_dec_info->video_dst_data[0], 1, p_dec_info->video_dst_bufsize, p_input_par->video_dst_file);
+                    break;
+                }
+            }else if (p_pkt->stream_index == p_input_stream_info->audio_stream_idx) {
+                //donnot handle audio stream
+            }
+            ret = p_pkt->size;
+            p_pkt->size -= ret;
+            p_pkt->data += ret;
+        }while (p_pkt->size > 0);
+    }
+
+    return ret;
+}
+
+static int decode_prepare(InputStreamInfo **p_input_stream_info, DecodeInfo *p_dec_info)
+{
+    InputStreamInfo *ps = *p_input_stream_info;
+
+    p_dec_info->width  = ps->p_video_codec_par->width;
+    p_dec_info->height = ps->p_video_codec_par->height;
+    p_dec_info->pix_fmt = ps->p_video_codec_par->format;
+    p_dec_info->video_dst_bufsize = av_image_alloc(p_dec_info->video_dst_data, p_dec_info->video_dst_linesize,
+                                                    p_dec_info->width, p_dec_info->height, p_dec_info->pix_fmt, 1);
+
+    if (p_dec_info->video_dst_bufsize < 0) {
+        fprintf(stderr, "ProgEagle could not allocate raw video buffer\n");
+        return -1;
+    }
+
+    //allocate frame to store the decoded output data
+    ps->p_frame = av_frame_alloc();
+    if (!ps->p_frame) {
+        fprintf(stderr, "ProgEagle: could not allocate frame\n");
+        return -1;
+    }
+
+    //allocate avpkt to store the raw data to be decode
+    ps->p_pkt = av_packet_alloc();
+    if (!ps->p_pkt) {
+        fprintf(stderr, "ProgEagle: coudl not allocate packet\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int open_video_codec_and_context(InputStreamInfo **pp_input_stream_info)
+{
+    int ret = 0;
+    int stream_idx = -1;
+    InputStreamInfo *ps = *pp_input_stream_info;
+
+    //open video codec
+    ret = av_find_best_stream(ps->p_fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+    if (ret < 0) {
+        fprintf(stderr, "ProgEagle: could not find %s stream in input file\n",
+                        av_get_media_type_string(AVMEDIA_TYPE_VIDEO));
+        return ret;
+    }
+
+    ps->video_stream_idx = ret;
+    stream_idx = ps->video_stream_idx;
+    ps->p_video_stream = ps->p_fmt_ctx->streams[stream_idx];
+
+    //find decoder for the stream
+    ps->p_video_codec_par = ps->p_video_stream->codecpar;
+    ps->p_video_codec     = avcodec_find_decoder(ps->p_video_codec_par->codec_id);
+    if (!ps->p_video_codec) {
+        fprintf(stderr, "ProgEagle: failed to find %s codec\n", 
+            av_get_media_type_string(AVMEDIA_TYPE_VIDEO));
+        return AVERROR(EINVAL);
+    }
+
+    //get the codeccontext
+    ps->p_video_codecctx = (AVCodecContext *)avcodec_alloc_context3(ps->p_video_codec);
+    if (!ps->p_video_codec) {
+        fprintf(stderr, "ProgEagle: could not allocate video codec context\n");
+        return AVERROR(ENOMEM);
+    }
+
+    //copy codec parameters from input stream to output codec context
+    if ((ret = avcodec_parameters_to_context(ps->p_video_codecctx, ps->p_video_codec_par)) < 0) {
+        fprintf(stderr, "ProgEagle: failed to copy %s codec parameters to decoder context\n",
+                av_get_media_type_string(AVMEDIA_TYPE_VIDEO));
+        return ret;
+    }
+
+    //open video decoder
+    if ((ret = avcodec_open2(ps->p_video_codecctx, ps->p_video_codec, NULL)) < 0) {
+        fprintf(stderr, "ProgEagle: failed to pen %s codec\n", 
+            av_get_media_type_string(AVMEDIA_TYPE_VIDEO));
+        return ret;
+    }
+
+    return ret;    
+}
+
+static int open_audio_codec_and_context(InputStreamInfo **pp_input_stream_info)
+{
+    return 0;
+}
+
+static int open_codecs_and_contexts(InputStreamInfo **pp_input_stream_info) {
+    int ret = 0;
+
+    ret = open_video_codec_and_context(pp_input_stream_info);
+    if (ret != 0) {
+        fprintf(stderr, "ProgEagle: Open video Codec and Context fail\n");
+        return ret;
+    }
+
+    ret = open_audio_codec_and_context(pp_input_stream_info);
+    if (ret != 0) {
+        fprintf(stderr, "ProgEagle: Open audio Codec and Context fail\n");
+        return ret;
+    }
+
+    return ret;
+}
+
+
+static int get_input_fmt(InputStreamInfo **pp_input_stream_info, char *filename)
+{
+    int ret = 0;
+    InputStreamInfo *p_input_stream_info = *pp_input_stream_info;
+
+    //Open input file, and allocate format context
+    if ((ret = avformat_open_input(&(p_input_stream_info->p_fmt_ctx), filename, NULL, NULL) < 0)) {
+        fprintf(stderr, "ProgEagle:could not open source file %s\n", filename);
+        return ret;
+    }
+
+    //dump input information
+    av_dump_format(p_input_stream_info->p_fmt_ctx, 0, filename, 0);
+
+    //retrive stream information
+    if ((ret = avformat_find_stream_info(p_input_stream_info->p_fmt_ctx, NULL) < 0)) {
+        fprintf(stderr, "ProgEagle: could not find stream information");
+        return ret;
+    }
+
+    return ret;
+}
+
+//decode the mp4 format h264 codec to yuv,
+static void FristPartofPreProcess(char *filename)
+{
+    int ret = -1;
+    int video_stream_idx = -1, audio_stream_idx = -1;
+
+    DecodeInfo decinfo;
+    InputParams inputpar;
+    inputpar.video_dst_file = (FILE *)fopen("./output.bin", "wb");
+
+    InputStreamInfo *p_input_stream_info = (InputStreamInfo *)malloc(sizeof(InputStreamInfo));
+    if (!p_input_stream_info) {
+        fprintf(stderr, "ProgEagle:allocate input stream info fail\n");
+        return -1;
+    } else {
+        memset(p_input_stream_info, 0, sizeof(InputStreamInfo));
+    }
+
+    if ((ret = get_input_fmt(&p_input_stream_info, filename)) < 0) {
+        fprintf(stderr, "ProgEagle: get input format info fail\n");
+        return ret;
+    }
+
+    if ((ret = open_codecs_and_contexts(&p_input_stream_info)) != 0) {
+        fprintf(stderr, "ProgEagle: oepn codec and contexts fail\n");
+        return ret;
+    }
+
+    if ((ret = decode_prepare(&p_input_stream_info, &decinfo)) < 0) {
+        fprintf(stderr, "ProgEagle: decode prepare fail\n");
+        return ret;
+    }
+
+    if ((ret = decode_packet(p_input_stream_info, &decinfo, &inputpar)) < 0) {
+        fprintf(stderr, "ProgEagle: decode packet fail\n");
+        return ret;
+    }
+
+    return ret;
+}
+
 int main(int argc, char **argv)
 {
     int i, ret;
     BenchmarkTimeStamps ti;
+
+    //TODO:The first process is to get the target_vmaf
+    FristPartofPreProcess(argv[1]);
+
+    return 0;
+    //The second process is to get the dynamic crf
 
     init_dynload();
 
