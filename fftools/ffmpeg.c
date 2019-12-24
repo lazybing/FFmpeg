@@ -4876,6 +4876,159 @@ typedef struct DecodeInfo {
     enum AVPixelFormat pix_fmt;
 } DecodeInfo;
 
+typedef struct EncodeInfo {
+    AVCodec *codec;
+    AVCodecContext *codecCtx;
+    AVFrame *frame;
+    AVPacket *p_pkt;
+    AVPacket pkt;
+} EncodeInfo;
+
+static void fill_yuv_image(uint8_t *data[4], int linesize[4],
+								int width, int height, int frame_index)
+{
+	int x, y;
+
+	for (int plane = 0; plane < 3; plane++) {
+		int frame_height = plane == 0 ? height : height >> 1;
+		int frame_width  = plane == 0 ? width  : width  >> 1;
+		int frame_size   = frame_height * frame_width;
+		int frame_stride = linesize[plane];
+
+		if (frame_width == frame_stride) {
+			memcpy(data[plane], VideoBuffer + frame_index * frame_size, frame_size);
+		} else {
+			for (int row_idx = 0; row_idx < frame_height; row_idx++) {
+				memcpy(data[plane] + row_idx * frame_stride, 
+					VideoBuffer + frame_index * frame_size + row_idx * frame_stride, frame_width);
+			}
+		}
+	}
+}
+
+static int encode_frame(InputStreamInfo *p_input_stream_info, EncodeInfo *p_enc_info)
+{
+	int ret = 0;
+	int enc_frame_num = 0;
+	for (int i = 0; i < 50; i++) {
+		fill_yuv_image(p_enc_info->frame->data, p_enc_info->frame->linesize,
+						p_enc_info->codecCtx->width, p_enc_info->codecCtx->height, i);
+
+		p_enc_info->frame->pts = i;
+
+		//encode the image
+		ret = avcodec_send_frame(p_enc_info->codecCtx, p_enc_info->frame);
+		if (ret < 0) {
+			fprintf(stderr, "Eagle: Error sending a frame for encoding\n");
+			return ret;
+		}
+
+		while (ret >= 0) {
+			ret = avcodec_receive_packet(p_enc_info->codecCtx, p_enc_info->p_pkt);
+			if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+				fprintf(stderr, "Eagle: could not receive packet AVERROR_EOF %x AVERROR(EAGAIN) %x ret %x\n",
+								AVERROR_EOF, AVERROR(EAGAIN), ret);
+				break;
+			} else if (ret < 0) {
+				fprintf(stderr, "Eagle: error during encoding\n");
+				return ret;
+			}
+			printf("encoding success\n");
+			//fwrite(p_enc_info->p_pkt->data, 1, p_enc_info->p_pkt->size, );
+			//TODO:need to save the h264 format data into buffer to decode it
+			av_packet_unref(p_enc_info->p_pkt);
+		}
+	}
+
+	//flush
+	ret = avcodec_send_frame(p_enc_info->codecCtx, NULL);
+	if (ret < 0) {
+		fprintf(stderr, "Eagle: error sending a frame for encoding\n");
+		exit(1);
+	}
+
+	while (ret >= 0) {
+		ret = avcodec_receive_packet(p_enc_info->codecCtx, p_enc_info->p_pkt);
+		if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+			break;
+		} else if (ret < 0) {
+			fprintf(stderr, "Eagle: error during encoding\n");
+			exit(1);
+		}
+		//TODO:need to save the h264 format data into buffer to decode it
+		av_packet_unref(p_enc_info->p_pkt);
+		printf("flush success\n");
+	}
+
+	return ret;
+}
+
+static int encode_prepare(InputStreamInfo **p_input_stream_info, EncodeInfo *p_enc_info, DecodeInfo *p_dec_info)
+{
+    int ret = 0;
+    enum AVCodecID codec_id = AV_CODEC_ID_H264;
+    p_enc_info->codec = avcodec_find_encoder(codec_id);
+    if (!p_enc_info->codec) {
+        fprintf(stderr, "Eagle: could not find the encoder\n");
+        return -1;
+    }
+
+    p_enc_info->codecCtx = avcodec_alloc_context3(p_enc_info->codec);
+    if (!p_enc_info->codecCtx) {
+        fprintf(stderr, "Eagle: could not allocate video codec context\n");
+        return -1;
+    }
+
+    p_enc_info->codecCtx->width   = p_dec_info->width;
+    p_enc_info->codecCtx->height  = p_dec_info->height;
+    p_enc_info->codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
+	p_enc_info->codecCtx->time_base = (AVRational){1, 25};
+	p_enc_info->codecCtx->framerate = (AVRational){25, 1};
+
+    av_opt_set(p_enc_info->codecCtx->priv_data, "profile", "high", 0);
+    av_opt_set(p_enc_info->codecCtx->priv_data, "preset", "medium", 0);
+    av_opt_set(p_enc_info->codecCtx->priv_data, "tnue", "ssim", 0);
+
+    // open the encoder
+    if (avcodec_open2(p_enc_info->codecCtx, p_enc_info->codec, NULL) < 0) {
+        fprintf(stderr, "Eagle: Open encoder fail\n");
+        return -1;
+    }
+
+    //allocate AVFrame structure
+    p_enc_info->frame = av_frame_alloc();
+    if (!p_enc_info->frame) {
+        fprintf(stderr, "Eagle: could not allocate video frame\n");
+        return -1;
+    }
+    p_enc_info->frame->width  = p_enc_info->codecCtx->width;
+    p_enc_info->frame->height = p_enc_info->codecCtx->height;
+    p_enc_info->frame->format = p_enc_info->codecCtx->pix_fmt;
+	p_enc_info->frame->linesize[0] = 1920;
+	p_enc_info->frame->linesize[1] = p_enc_info->frame->linesize[2] = 960;
+
+	//allocate AVFrame data
+	ret = av_frame_get_buffer(p_enc_info->frame, 32);
+	if (ret < 0) {
+		fprintf(stderr, "Eagle: could not allocate the video frame data\n");
+		return ret;
+	}
+
+    //init AVPacket
+    av_init_packet(&p_enc_info->pkt);
+    p_enc_info->pkt.data = NULL;
+    p_enc_info->pkt.size = 0;
+
+    p_enc_info->p_pkt = av_packet_alloc();
+    if (!p_enc_info->p_pkt) {
+        fprintf(stderr, "Eagle: could not allocate pkt\n");
+        return -1;
+    }
+	printf("start to encode\n");
+
+    return ret;
+}
+
 static long long get_unsharp_val(uint8_t *data, int width, int height, double amounts, int msize_x, int msize_y)
 {
     int tmp1, tmp2;
@@ -4934,7 +5087,7 @@ static int decode_packet(InputStreamInfo *p_input_stream_info, DecodeInfo *p_dec
             if (p_pkt->stream_index == p_input_stream_info->video_stream_idx) {
                 ret = avcodec_send_packet(p_input_stream_info->p_video_codecctx, p_pkt);
                 if (ret != 0) {
-                    fprintf(stderr, "ProgEagle: Error sending a packet for decoding\n");
+                    fprintf(stderr, "Eagle: Error sending a packet for decoding\n");
                     return ret;
                 }
 
@@ -4943,7 +5096,7 @@ static int decode_packet(InputStreamInfo *p_input_stream_info, DecodeInfo *p_dec
                     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                         break;
                     } else if (ret < 0) {
-                        fprintf(stderr, "ProgEagle: Error during decoding\n");
+                        fprintf(stderr, "Eagle: Error during decoding\n");
                         break;
                     }
                     //fprintf(stdout, "framenum %d\n", p_input_stream_info->p_frame->coded_picture_number);
@@ -4956,13 +5109,16 @@ static int decode_packet(InputStreamInfo *p_input_stream_info, DecodeInfo *p_dec
                     sharpness = get_unsharp_val(p_dec_info->video_dst_data[0],
                                     p_dec_info->width, p_dec_info->height, 1.0, 5, 5);
                     //fwrite(p_dec_info->video_dst_data[0], 1, p_dec_info->video_dst_bufsize, p_input_par->video_dst_file);
-                    if (framenum <= 50) {
+                    if (framenum >= 50) {
                         memcpy(VideoBuffer + framenum * p_dec_info->width * p_dec_info->height * 3 / 2,
                             p_dec_info->video_dst_data[0],  p_dec_info->width * p_dec_info->height * 3 / 2);
                         //FILE *fp = fopen("./videobuffer.yuv", "wb");
                         //fwrite(VideoBuffer, 1, framenum * p_dec_info->width * p_dec_info->height * 3 / 2, fp);
                         //fclose(fp);
                         //getchar();
+                        p_pkt->size = 0;
+                        p_pkt->data += p_pkt->size;
+						framenum == 0;
                         return 0;
                     }
                     framenum++;
@@ -4991,21 +5147,21 @@ static int decode_prepare(InputStreamInfo **p_input_stream_info, DecodeInfo *p_d
                                                     p_dec_info->width, p_dec_info->height, p_dec_info->pix_fmt, 1);
 
     if (p_dec_info->video_dst_bufsize < 0) {
-        fprintf(stderr, "ProgEagle could not allocate raw video buffer\n");
+        fprintf(stderr, "Eagle could not allocate raw video buffer\n");
         return -1;
     }
 
     //allocate frame to store the decoded output data
     ps->p_frame = av_frame_alloc();
     if (!ps->p_frame) {
-        fprintf(stderr, "ProgEagle: could not allocate frame\n");
+        fprintf(stderr, "Eagle: could not allocate frame\n");
         return -1;
     }
 
     //allocate avpkt to store the raw data to be decode
     ps->p_pkt = av_packet_alloc();
     if (!ps->p_pkt) {
-        fprintf(stderr, "ProgEagle: coudl not allocate packet\n");
+        fprintf(stderr, "Eagle: coudl not allocate packet\n");
         return -1;
     }
 
@@ -5021,7 +5177,7 @@ static int open_video_codec_and_context(InputStreamInfo **pp_input_stream_info)
     //open video codec
     ret = av_find_best_stream(ps->p_fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
     if (ret < 0) {
-        fprintf(stderr, "ProgEagle: could not find %s stream in input file\n",
+        fprintf(stderr, "Eagle: could not find %s stream in input file\n",
                         av_get_media_type_string(AVMEDIA_TYPE_VIDEO));
         return ret;
     }
@@ -5034,7 +5190,7 @@ static int open_video_codec_and_context(InputStreamInfo **pp_input_stream_info)
     ps->p_video_codec_par = ps->p_video_stream->codecpar;
     ps->p_video_codec     = avcodec_find_decoder(ps->p_video_codec_par->codec_id);
     if (!ps->p_video_codec) {
-        fprintf(stderr, "ProgEagle: failed to find %s codec\n", 
+        fprintf(stderr, "Eagle: failed to find %s codec\n", 
             av_get_media_type_string(AVMEDIA_TYPE_VIDEO));
         return AVERROR(EINVAL);
     }
@@ -5042,20 +5198,20 @@ static int open_video_codec_and_context(InputStreamInfo **pp_input_stream_info)
     //get the codeccontext
     ps->p_video_codecctx = (AVCodecContext *)avcodec_alloc_context3(ps->p_video_codec);
     if (!ps->p_video_codec) {
-        fprintf(stderr, "ProgEagle: could not allocate video codec context\n");
+        fprintf(stderr, "Eagle: could not allocate video codec context\n");
         return AVERROR(ENOMEM);
     }
 
     //copy codec parameters from input stream to output codec context
     if ((ret = avcodec_parameters_to_context(ps->p_video_codecctx, ps->p_video_codec_par)) < 0) {
-        fprintf(stderr, "ProgEagle: failed to copy %s codec parameters to decoder context\n",
+        fprintf(stderr, "Eagle: failed to copy %s codec parameters to decoder context\n",
                 av_get_media_type_string(AVMEDIA_TYPE_VIDEO));
         return ret;
     }
 
     //open video decoder
     if ((ret = avcodec_open2(ps->p_video_codecctx, ps->p_video_codec, NULL)) < 0) {
-        fprintf(stderr, "ProgEagle: failed to pen %s codec\n", 
+        fprintf(stderr, "Eagle: failed to pen %s codec\n", 
             av_get_media_type_string(AVMEDIA_TYPE_VIDEO));
         return ret;
     }
@@ -5073,13 +5229,13 @@ static int open_codecs_and_contexts(InputStreamInfo **pp_input_stream_info) {
 
     ret = open_video_codec_and_context(pp_input_stream_info);
     if (ret != 0) {
-        fprintf(stderr, "ProgEagle: Open video Codec and Context fail\n");
+        fprintf(stderr, "Eagle: Open video Codec and Context fail\n");
         return ret;
     }
 
     ret = open_audio_codec_and_context(pp_input_stream_info);
     if (ret != 0) {
-        fprintf(stderr, "ProgEagle: Open audio Codec and Context fail\n");
+        fprintf(stderr, "Eagle: Open audio Codec and Context fail\n");
         return ret;
     }
 
@@ -5094,7 +5250,7 @@ static int get_input_fmt(InputStreamInfo **pp_input_stream_info, char *filename)
 
     //Open input file, and allocate format context
     if ((ret = avformat_open_input(&(p_input_stream_info->p_fmt_ctx), filename, NULL, NULL) < 0)) {
-        fprintf(stderr, "ProgEagle:could not open source file %s\n", filename);
+        fprintf(stderr, "Eagle:could not open source file %s\n", filename);
         return ret;
     }
 
@@ -5103,7 +5259,7 @@ static int get_input_fmt(InputStreamInfo **pp_input_stream_info, char *filename)
 
     //retrive stream information
     if ((ret = avformat_find_stream_info(p_input_stream_info->p_fmt_ctx, NULL) < 0)) {
-        fprintf(stderr, "ProgEagle: could not find stream information");
+        fprintf(stderr, "Eagle: could not find stream information");
         return ret;
     }
 
@@ -5117,36 +5273,47 @@ static int FristPartofPreProcess(char *filename)
     int video_stream_idx = -1, audio_stream_idx = -1;
 
     DecodeInfo decinfo;
+    EncodeInfo encinfo;
     InputParams inputpar;
     inputpar.video_dst_file = (FILE *)fopen("./output.yuv", "wb");
 
     InputStreamInfo *p_input_stream_info = (InputStreamInfo *)malloc(sizeof(InputStreamInfo));
     if (!p_input_stream_info) {
-        fprintf(stderr, "ProgEagle:allocate input stream info fail\n");
+        fprintf(stderr, "Eagle:allocate input stream info fail\n");
         return -1;
     } else {
         memset(p_input_stream_info, 0, sizeof(InputStreamInfo));
     }
 
     if ((ret = get_input_fmt(&p_input_stream_info, filename)) < 0) {
-        fprintf(stderr, "ProgEagle: get input format info fail\n");
+        fprintf(stderr, "Eagle: get input format info fail\n");
         return ret;
     }
 
     if ((ret = open_codecs_and_contexts(&p_input_stream_info)) != 0) {
-        fprintf(stderr, "ProgEagle: oepn codec and contexts fail\n");
+        fprintf(stderr, "Eagle: oepn codec and contexts fail\n");
         return ret;
     }
 
     if ((ret = decode_prepare(&p_input_stream_info, &decinfo)) < 0) {
-        fprintf(stderr, "ProgEagle: decode prepare fail\n");
+        fprintf(stderr, "Eagle: decode prepare fail\n");
         return ret;
     }
 
     if ((ret = decode_packet(p_input_stream_info, &decinfo, &inputpar)) < 0) {
-        fprintf(stderr, "ProgEagle: decode packet fail\n");
+        fprintf(stderr, "Eagle: decode packet fail\n");
         return ret;
     }
+
+    if ((ret = encode_prepare(&p_input_stream_info, &encinfo, &decinfo)) < 0) {
+        fprintf(stderr, "Eagle: encode prepare fail\n");
+        return ret;
+    }
+
+	if ((ret = encode_frame(p_input_stream_info, &encinfo)) < 0) {
+		fprintf(stderr, "Eagle: encode frame fail\n");
+		return ret;
+	}
 
     return ret;
 }
@@ -5156,11 +5323,12 @@ int main(int argc, char **argv)
     int i, ret;
     BenchmarkTimeStamps ti;
 
-    //TODO:The first process is to get the target_vmaf
+    //TODO:The first process is to get the target_vmaf and sharpness value for each segment
     FristPartofPreProcess(argv[1]);
 
+    //TODO:The second process is to get the dynamic crf
+    //SecondPartofPreProcess();
     return 0;
-    //The second process is to get the dynamic crf
 
     init_dynload();
 
