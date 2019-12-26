@@ -32,6 +32,7 @@
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <libvmaf.h>
 
 #if HAVE_IO_H
 #include <io.h>
@@ -4884,6 +4885,112 @@ typedef struct EncodeInfo {
     AVPacket pkt;
 } EncodeInfo;
 
+struct data {
+	char *format;
+	int width;
+	int height;
+	size_t offset;
+	FILE *ref_rfile;
+	FILE *dis_rfile;
+	int num_frames;
+};
+
+/**
+ * Note: stride is in terms of bytes
+ */
+static int read_image_b(FILE *rfile, float *buf, float off, int width, int height, int stride)
+{
+	char *byte_ptr = (char *)buf;
+	unsigned char *tmp_buf = 0;
+	int i, j;
+	int ret = 1;
+
+	if (width <= 0 || height <= 0)
+		goto fail_or_end;
+
+	if (!(tmp_buf = malloc(width)))
+		goto fail_or_end;
+
+	for (i = 0; i < height; i++) {
+		float *row_ptr = (float *)byte_ptr;
+
+		if (fread(tmp_buf, 1, width, rfile) != (size_t)width)
+			goto fail_or_end;
+
+		for (j = 0; j < width; j++)
+			row_ptr[j] = tmp_buf[j] + off;
+
+		byte_ptr += stride;
+	}
+
+	ret = 0;
+
+fail_or_end:
+	free(tmp_buf);
+	return ret;
+}
+
+static int completed_frames = 0;
+
+static int read_frame(float *ref_data, float *dis_data, float *temp_data, int stride_byte, void *s)
+{
+	struct data *user_data = (struct data *)s;
+	char *fmt = user_data->format;
+	int w = user_data->width;
+	int h = user_data->height;
+	int ret;
+
+	//read ref y
+	if (!strcmp(fmt, "yuv420p")) {
+		ret = read_image_b(user_data->ref_rfile, ref_data, 0, w, h, stride_byte);
+	} else {
+		fprintf(stderr, "Eagle: unknown format %s.\n", fmt);
+		return 1;
+	}
+	if (ret) {
+		if (feof(user_data->ref_rfile))
+			ret = 2;
+		return ret;
+	}
+
+	//read dis y
+	if (!strcmp(fmt, "yuv420p")) {
+		ret = read_image_b(user_data->dis_rfile, dis_data, 0, w, h, stride_byte);
+	} else {
+		fprintf(stderr, "Eagle: unknown format %s.\n", fmt);
+		return 1;
+	}
+	if (ret) {
+		if (feof(user_data->dis_rfile))
+			ret = 2;
+		return ret;
+	}
+
+	//ref skip u and v
+	if (!strcmp(fmt, "yuv420p")) {
+		if (fread(temp_data, 1, user_data->offset, user_data->ref_rfile) != (size_t)user_data->offset) {
+			fprintf(stderr, "Eagle: ref fread u an v failed.\n");
+			goto fail_or_end;
+		}
+	} else {
+		fprintf(stderr, "Eagle: unknown format %s.\n", fmt);
+		goto fail_or_end;
+	}
+
+	//dis skip u and v
+	if (!strcmp(fmt, "yuv420p")) {
+		if (fread(temp_data, 1, user_data->offset, user_data->dis_rfile) != (size_t)user_data->offset) {
+			fprintf(stderr, "Eagle: dis fread u and v failed.\n");
+			goto fail_or_end;
+		}
+	} else {
+		fprintf(stderr, "Eagle: Frame %d/%d\r", completed_frames++, user_data->num_frames);
+	}
+
+fail_or_end:
+	return ret;
+}
+
 static void fill_yuv_image(uint8_t *data[4], int linesize[4],
 								int width, int height, int frame_index)
 {
@@ -4960,7 +5067,7 @@ static int encode_frame(InputStreamInfo *p_input_stream_info, EncodeInfo *p_enc_
 		printf("flush success\n");
 	}
 
-	return ret;
+	return 0;
 }
 
 static int encode_prepare(InputStreamInfo **p_input_stream_info, EncodeInfo *p_enc_info, DecodeInfo *p_dec_info)
@@ -5267,10 +5374,42 @@ static int get_input_fmt(InputStreamInfo **pp_input_stream_info, char *filename)
 }
 
 //decode the mp4 format h264 codec to yuv,
-static int FristPartofPreProcess(char *filename)
+static int FristPartofPreProcess(char *filename, char *file2)
 {
+	const char *fmt = "yuv420p";
+	char *log_file = "./log.txt";
+	int vmaf_width, vmaf_height;
+	char *model_path = "/usr/local/share/model/vmaf_v0.6.1.pkl";
+	const char *pool_method = "mean";
     int ret = -1;
+	double vmaf_score = 0.0;
     int video_stream_idx = -1, audio_stream_idx = -1;
+#if 0
+    struct data *s = (struct data *)malloc(sizeof(struct data));
+	s->format = fmt;
+	vmaf_width  = 576;
+	vmaf_height = 324;
+	s->format = fmt;
+	s->width  = vmaf_width;
+	s->height = vmaf_height;
+	if (!strcmp(fmt, "yuv420p")) {
+		if ((vmaf_width * vmaf_height) % 2 != 0) {
+			fprintf(stderr, "(width * height) %% 2 != 0, width = %d, height = %d.\n", vmaf_width, vmaf_height);
+			ret = 1;
+			exit(0);
+		}
+		s->offset = vmaf_width * vmaf_height / 2;
+	}
+	s->ref_rfile = fopen(file2, "rb");
+	s->dis_rfile = fopen(filename, "rb");
+	s->num_frames = 0;
+
+	compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame, s, model_path, log_file, NULL,
+				1, 1, 0, 0, 0, 0,
+				0, pool_method, 0, 1, 0);
+	printf("compute_vmaf done vmaf_score %f\n", vmaf_score);
+	exit(1);
+#endif
 
     DecodeInfo decinfo;
     EncodeInfo encinfo;
@@ -5285,6 +5424,7 @@ static int FristPartofPreProcess(char *filename)
         memset(p_input_stream_info, 0, sizeof(InputStreamInfo));
     }
 
+	//1. handle the input mp4 file, to get some information about the stream
     if ((ret = get_input_fmt(&p_input_stream_info, filename)) < 0) {
         fprintf(stderr, "Eagle: get input format info fail\n");
         return ret;
@@ -5295,6 +5435,7 @@ static int FristPartofPreProcess(char *filename)
         return ret;
     }
 
+	//2. decode the codec data(h264) to yuv data
     if ((ret = decode_prepare(&p_input_stream_info, &decinfo)) < 0) {
         fprintf(stderr, "Eagle: decode prepare fail\n");
         return ret;
@@ -5305,6 +5446,7 @@ static int FristPartofPreProcess(char *filename)
         return ret;
     }
 
+	//3. encode the yuv data decoded in part 2 to h264 file, using crf 18..
     if ((ret = encode_prepare(&p_input_stream_info, &encinfo, &decinfo)) < 0) {
         fprintf(stderr, "Eagle: encode prepare fail\n");
         return ret;
@@ -5315,6 +5457,30 @@ static int FristPartofPreProcess(char *filename)
 		return ret;
 	}
 
+	//4. calculate the vmaf score
+	#if 0
+	vmaf_width  = encinfo.frame->width;
+	vmaf_height = encinfo.frame->height;
+	s->format = fmt;
+	s->width  = vmaf_width;
+	s->height = vmaf_height;
+	if (!strcmp(fmt, "yuv420p")) {
+		if ((vmaf_width * vmaf_height) % 2 != 0) {
+			fprintf(stderr, "(width * height) %% 2 != 0, width = %d, height = %d.\n", vmaf_width, vmaf_height);
+			ret = 1;
+			exit(0);
+		}
+		s->offset = vmaf_width * vmaf_height / 2;
+	}
+	s->ref_rfile = fopen(filename, "rb");
+	s->dis_rfile = fopen(filename, "rb");
+	s->num_frames = -1;
+
+	compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame, s, model_path, NULL, NULL,
+				1, 1, 0, 0, 0, 0,
+				0, pool_method, 0, 1, 0);
+	printf("compute_vmaf done vmaf_score %f\n", vmaf_score);
+	#endif
     return ret;
 }
 
@@ -5324,7 +5490,7 @@ int main(int argc, char **argv)
     BenchmarkTimeStamps ti;
 
     //TODO:The first process is to get the target_vmaf and sharpness value for each segment
-    FristPartofPreProcess(argv[1]);
+    FristPartofPreProcess(argv[1], argv[2]);
 
     //TODO:The second process is to get the dynamic crf
     //SecondPartofPreProcess();
