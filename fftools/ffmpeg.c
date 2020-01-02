@@ -70,6 +70,13 @@
 # include "libavfilter/avfilter.h"
 # include "libavfilter/buffersrc.h"
 # include "libavfilter/buffersink.h"
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+//#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
+#include <libavutil/avutil.h>
+#include <libavutil/imgutils.h>
 
 #if HAVE_SYS_RESOURCE_H
 #include <sys/time.h>
@@ -4987,17 +4994,23 @@ typedef struct DecEncH264FmtInfo {
 	FILE *outputfp;
 }DecEncH264FmtInfo;
 
-static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int height, int stride)
+AVFilterContext *buffersink_ctx;
+AVFilterContext *buffersrc_ctx;
+AVFilterGraph *filter_graph;
+
+static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int height, int stride, int ref_flag)
 {
 	char *byte_ptr = (char *)buf;
 	unsigned char *tmp_buf = 0;
 	int i, j;
 	int ret = 1;
 	static int first_flag = 1;
-	static int reserved = 0;
+	static int reserved_ref = 0;
+	static int reserved_dis = 0;
 	if (first_flag) {
 		first_flag = 0;
-		reserved = width * height * 50 * 3 / 2;
+		reserved_ref = width * height * 50 * 3 / 2;
+		reserved_dis = width * height * 50 * 3 / 2;
 	}
 
 	if (width <= 0 || height <= 0)
@@ -5010,15 +5023,21 @@ static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int
 
 		//if (fread(tmp_buf, 1, width, rfile) != (size_t)width)
 		//	goto fail_or_end;
-		memcpy(tmp_buf, data + 50*width*height*3/2 - reserved + i * width, width);
+		if (ref_flag)
+			memcpy(tmp_buf, data + 50*width*height*3/2 - reserved_ref + i * width, width);
+		else
+			memcpy(tmp_buf, data + 50*width*height*3/2 - reserved_dis + i * width, width);
 		for (j = 0; j < width; j++)
 			row_ptr[j] = tmp_buf[j] + off;
 
 		byte_ptr += stride;
 	}
-	reserved -= width * height * 3 / 2;
+	if (ref_flag)
+		reserved_ref -= width * height * 3 / 2;
+	else
+		reserved_dis -= width * height * 3 / 2;
 
-	if (reserved == 0)
+	if (reserved_ref == 0 || reserved_dis == 0)
 	{
 		first_flag = 1;
 		return 2;
@@ -5078,7 +5097,7 @@ static int read_frame_new(float *ref_data, float *dis_data, float *temp_data, in
 
 	//read ref y
 	if (!strcmp(fmt, "yuv420p")) {
-		ret = read_image_new_b(user_data->ref, ref_data, 0, w, h, stride_byte);
+		ret = read_image_new_b(user_data->ref, ref_data, 0, w, h, stride_byte, 1);
 	} else {
 		fprintf(stderr, "Eagle: unknown format %s.\n", fmt);
 		return 1;		
@@ -5088,7 +5107,7 @@ static int read_frame_new(float *ref_data, float *dis_data, float *temp_data, in
 	printf("read_frame_new width %d height %d\n", w, h);
 	//read dis y
 	if (!strcmp(fmt, "yuv420p")) {
-		ret = read_image_new_b(user_data->dis, dis_data, 0, w, h, stride_byte);
+		ret = read_image_new_b(user_data->dis, dis_data, 0, w, h, stride_byte, 0);
 	} else {
 		fprintf(stderr, "Eagle: unknown format %s.\n", fmt);
 		return 1;
@@ -5690,6 +5709,159 @@ static int Decode_Encoded_H264_Raw(DecEncH264FmtInfo *pinfo)
 
 }
 
+static int compute_vmaf_prepare(struct newData **s, int *vmaf_width, int *vmaf_height, DecEncH264FmtInfo *Dec264FmtInfo)
+{
+	int ret = 0;
+	struct newData *ps = *s;
+	ps = (struct newData *)malloc(sizeof(struct newData));
+	ps->format   = "yuv420p";
+	*vmaf_width  = Dec264FmtInfo->frame->width;
+	*vmaf_height = Dec264FmtInfo->frame->height;
+	ps->width =  *vmaf_width;
+	ps->height = *vmaf_height;
+	if (!strcmp(ps->format, "yuv420p")) {
+		if (((*vmaf_width) * (*vmaf_height)) % 2 != 0) {
+			fprintf(stderr, "(width * height) %% 2 != 0, width = %d, height %d.\n", (*vmaf_width), (*vmaf_height));
+			ret = 1;
+			exit(0);
+		}
+		ps->offset = (*vmaf_width) * (*vmaf_height) >> 1;
+	}
+	ps->ref = VideoBuffer;
+	ps->dis = DecodeVideoBuffer;
+	ps->num_frames = -1;
+	printf("format %s width %d height %d\n", ps->format, ps->width, ps->height);
+
+	return 0;	
+}
+
+static int init_video_filter(const char *filter_descr, int width, int height)
+{
+	char args[512];
+
+	AVFilter *buffersrc = avfilter_get_by_name("buffer");
+	AVFilter *buffersink = avfilter_get_by_name("buffersink");
+	AVFilterInOut *outputs = avfilter_inout_alloc();
+	AVFilterInOut *inputs  = avfilter_inout_alloc();
+
+	enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE};
+	AVBufferSinkParams *buffersink_params;
+
+	filter_graph = avfilter_graph_alloc();
+
+	//buffers video source: the decoded frames from the decoder will be inserted here.
+	snprintf(args, sizeof(args), "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d", width, height, AV_PIX_FMT_YUV420P, 1, 25, 1, 1);
+	int ret = avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in", args, NULL, filter_graph);
+	if (ret < 0) {
+		printf("Error: cannot create buffer source.\n");
+		return ret;
+	}
+
+	//buffer video sink: to terminate the filter chain
+	buffersink_params = av_buffersink_params_alloc();
+	buffersink_params->pixel_fmts = pix_fmts;
+
+	ret = avfilter_graph_create_filter(&buffersink_ctx, buffersink, "out", NULL, buffersink_params, filter_graph);;
+	av_free(buffersink_params);
+	if (ret < 0) {
+		printf("error: cannot create buffer sink\n");
+		return ret;
+	}
+
+	//encpoints for the filter graph.
+	outputs->name = av_strdup("in");
+	outputs->filter_ctx = buffersrc_ctx;
+	outputs->pad_idx = 0;
+	outputs->next = NULL;
+
+	inputs->name = av_strdup("out");
+	inputs->filter_ctx = buffersink_ctx;
+	inputs->pad_idx = 0;
+	inputs->next = NULL;
+
+    if ((ret = avfilter_graph_parse_ptr(filter_graph, filter_descr, &inputs, &outputs, NULL)) < 0) {
+        printf("error: avfilter_graph_parse_ptr failed\n");
+        return ret;
+    }
+
+    if ((ret = avfilter_graph_config(filter_graph, NULL)) < 0) {
+        printf("error: avfilter_graph_config\n");
+        return ret;
+    }
+
+    return 0;	
+}
+
+static int add_frame_to_filter(AVFrame *frameIn)
+{
+	if (av_buffersrc_add_frame(buffersrc_ctx, frameIn) < 0) {
+		return 0;
+	}
+	return 1;
+}
+
+static int get_frame_from_filter(AVFrame **frameOut)
+{
+	if (av_buffersink_get_frame(buffersink_ctx, *frameOut) < 0){
+		return 0;
+	}
+	return 1;
+}
+
+static void init_video_frame_in_out(AVFrame **frameIn, AVFrame **frameOut, unsigned char **frame_buffer_in, unsigned char **frame_buffer_out, int frameWidth, int frameHeight)
+{
+    *frameIn = av_frame_alloc();
+    *frame_buffer_in = (unsigned char *)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_YUV420P, frameWidth, frameHeight, 1));
+    av_image_fill_arrays((*frameIn)->data, (*frameIn)->linesize, *frame_buffer_in, AV_PIX_FMT_YUV420P, frameWidth, frameHeight, 1);
+
+    *frameOut = av_frame_alloc();
+    *frame_buffer_out = (unsigned char *)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_YUV420P, frameWidth, frameHeight, 1));
+    av_image_fill_arrays((*frameOut)->data, (*frameOut)->linesize, *frame_buffer_out, AV_PIX_FMT_YUV420P, frameWidth, frameHeight, 1);
+
+    (*frameIn)->width  = frameWidth;
+    (*frameIn)->height = frameHeight;
+    (*frameIn)->format = AV_PIX_FMT_YUV420P;
+}
+
+static int read_yuv_data_to_buf(unsigned char *frame_buffer_in, const uint8_t *data, AVFrame **frameIn, int width, int height)
+{
+	static int filter_frame_num = 0;
+	AVFrame *pFrameIn = *frameIn;
+	int frameSize = width * height * 3 / 2;
+
+	//if (fread(frame_buffer_in, 1, frameSize, files.iFile) != frameSize) {
+	//	return 0;
+	//}
+
+	if(filter_frame_num < 50)
+		memcpy(frame_buffer_in, data, frameSize);
+	else
+		return 0;
+
+	pFrameIn->data[0] = frame_buffer_in;
+	pFrameIn->data[1] = pFrameIn->data[0] + width * height;
+	pFrameIn->data[2] = pFrameIn->data[1] + width * height / 4;
+
+	filter_frame_num++;
+	
+	return 1;
+}
+
+static void write_yuv_to_outfile(const AVFrame *frame_out, FILE *fp)
+{
+	if (frame_out->format == AV_PIX_FMT_YUV420P) {
+		for (int i = 0; i < frame_out->height; i++) {
+			fwrite(frame_out->data[0] + frame_out->linesize[0] * i, 1, frame_out->width, fp);;
+		}
+        for (int i = 0; i < frame_out->height >> 1; i++) {
+            fwrite(frame_out->data[1] + frame_out->linesize[1] * i, 1, frame_out->width >> 1, fp);
+        }
+        for (int i = 0; i < frame_out->height >> 1; i++) {
+            fwrite(frame_out->data[2] + frame_out->linesize[2] * i, 1, frame_out->width >> 1, fp);
+        }
+	}
+}
+
 //decode the mp4 format h264 codec to yuv,
 static int FristPartofPreProcess(char *filename)
 {
@@ -5700,6 +5872,7 @@ static int FristPartofPreProcess(char *filename)
 	const char *pool_method = NULL;//"mean";
     int ret = -1;
 	double vmaf_score = 0.0;
+	struct newData *s = NULL;
     int video_stream_idx = -1, audio_stream_idx = -1;
 
     DecodeInfo decinfo;
@@ -5707,11 +5880,24 @@ static int FristPartofPreProcess(char *filename)
     InputParams inputpar;
 	DecEncH264FmtInfo Dec264FmtInfo;
 
+	//filter part
+	AVFrame *frame_in = NULL;
+	AVFrame *frame_out = NULL;
+	unsigned char *frame_buffer_in  = NULL;
+	unsigned char *frame_buffer_out = NULL;
+	char *filter_descr = "unsharp=luma_msize_x=7:luma_msize_y=7:luma_amount=-1.0";
+	int frameWidth, frameHeight = 0;
+	AVFilterContext *buffersink_ctx;
+	AVFilterContext *buffersrc_ctx;
+	AVFilterGraph   *filter_graph;
+
 	Dec264FmtInfo.outputfp = (FILE *)fopen("./end.yuv", "wb");
 	if (Dec264FmtInfo.outputfp == NULL) {
 		printf("open end yuv fail\n");
 	}
     inputpar.video_dst_file = (FILE *)fopen("./output.yuv", "wb");
+
+	FILE *fp_filter = (FILE *)fopen("./filter.yuv", "wb+");
 
     InputStreamInfo *p_input_stream_info = (InputStreamInfo *)malloc(sizeof(InputStreamInfo));
     if (!p_input_stream_info) {
@@ -5764,8 +5950,10 @@ static int FristPartofPreProcess(char *filename)
 	}
 
 	//5. compare the yuv decoded from 4 and 2, to get the target score
-#if 1
-	struct newData *s = (struct newData *)malloc(sizeof(struct newData));
+#if 0
+	//compute_vmaf_prepare(&s, &vmaf_width, &vmaf_height, &Dec264FmtInfo);
+#else
+	s = (struct newData *)malloc(sizeof(struct newData));
 	s->format = fmt;
 	vmaf_width = Dec264FmtInfo.frame->width;
 	vmaf_height = Dec264FmtInfo.frame->height;
@@ -5782,64 +5970,45 @@ static int FristPartofPreProcess(char *filename)
 	s->ref = VideoBuffer;
 	s->dis = DecodeVideoBuffer;
 	s->num_frames = -1;
-	compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
-					1/*disable_clip*/, 1/*disable_avx*/, 0/*enable_transform*/, 0/*phone_model*/, 0/*do_psnr*/, 0/*do_ssim*/, 
-					0/*do_ms_ssim*/, pool_method, 1/*n_thread*/, 1/*n_subsample*/, 0/*enable_conf_interval*/);
-	printf("compute_vmaf done vmaf_score %f\n", vmaf_score);
-	exit(1);
-#else
-	struct data *s = (struct data *)malloc(sizeof(struct data));
-	s->format = fmt;
-	vmaf_width	= 576;
-	vmaf_height = 324;
-	s->format = fmt;
-	s->width  = vmaf_width;
-	s->height = vmaf_height;
-	if (!strcmp(fmt, "yuv420p")) {
-		if ((vmaf_width * vmaf_height) % 2 != 0) {
-			fprintf(stderr, "(width * height) %% 2 != 0, width = %d, height = %d.\n", vmaf_width, vmaf_height);
-			ret = 1;
-			exit(0);
-		}
-		s->offset = vmaf_width * vmaf_height / 2;
-	}
-	s->ref_rfile = fopen(file2, "rb");
-	s->dis_rfile = fopen(filename, "rb");
-	s->num_frames = -1;
-
-	printf("fmt %s vmaf_width %d vmaf_height %d\n", s->format, vmaf_width, vmaf_height);
-	compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame, s, model_path, log_file, NULL,
-				1/*disable_clip*/, 1/*disable_avx*/, 0/*enable_transform*/, 0/*phone_model*/, 0/*do_psnr*/, 0/*do_ssim*/, 
-				0/*do_ms_ssim*/, pool_method, 1/*n_thread*/, 1/*n_subsample*/, 0/*enable_conf_interval*/);
-	printf("compute_vmaf done vmaf_score %f\n", vmaf_score);
-	exit(1);
 #endif
-	
-	//4. calculate the vmaf score
-	#if 0
-	vmaf_width  = encinfo.frame->width;
-	vmaf_height = encinfo.frame->height;
-	s->format = fmt;
-	s->width  = vmaf_width;
-	s->height = vmaf_height;
-	if (!strcmp(fmt, "yuv420p")) {
-		if ((vmaf_width * vmaf_height) % 2 != 0) {
-			fprintf(stderr, "(width * height) %% 2 != 0, width = %d, height = %d.\n", vmaf_width, vmaf_height);
-			ret = 1;
-			exit(0);
-		}
-		s->offset = vmaf_width * vmaf_height / 2;
-	}
-	s->ref_rfile = fopen(filename, "rb");
-	s->dis_rfile = fopen(filename, "rb");
-	s->num_frames = -1;
-
-	compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame, s, model_path, NULL, NULL,
-				1, 1, 0, 0, 0, 0,
-				0, pool_method, 0, 1, 0);
+	//compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
+	//				1/*disable_clip*/, 1/*disable_avx*/, 0/*enable_transform*/, 0/*phone_model*/, 0/*do_psnr*/, 0/*do_ssim*/, 
+	//				0/*do_ms_ssim*/, pool_method, 1/*n_thread*/, 1/*n_subsample*/, 0/*enable_conf_interval*/);
 	printf("compute_vmaf done vmaf_score %f\n", vmaf_score);
-	#endif
-    return ret;
+	
+	//6. unsharp the decoded yuv data
+	//init filter struct
+	frameWidth  = Dec264FmtInfo.frame->width;
+	frameHeight = Dec264FmtInfo.frame->height;
+	if (ret = init_video_filter(filter_descr, frameWidth, frameHeight)) {
+		return ret;
+	};
+
+	init_video_frame_in_out(&frame_in, &frame_out, &frame_buffer_in, &frame_buffer_out, frameWidth, frameHeight);
+
+	while (read_yuv_data_to_buf(frame_buffer_in, VideoBuffer, &frame_in, frameWidth, frameHeight)) {
+		//add frame to filter graph
+		if (!add_frame_to_filter(frame_in)) {
+			printf("error: while adding frame\n");
+			goto end;
+		}
+
+		//get frame from filter graph
+		if (!get_frame_from_filter(&frame_out)) {
+			printf("error: while getting frame\n");
+			goto end;
+		}
+
+		//write the frame to output file
+		write_yuv_to_outfile(frame_out, fp_filter);
+	}
+
+	return ret;
+
+end:
+	av_frame_free(&frame_in);
+	av_frame_free(&frame_out);
+	return 0;
 }
 
 int main(int argc, char **argv)
