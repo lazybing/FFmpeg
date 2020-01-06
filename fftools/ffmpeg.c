@@ -6027,7 +6027,7 @@ static int enc_filtered_yuv_to_264()
 				fwrite(ppkt->data, 1, ppkt->size, fp);
 				fclose(fp);
 				memcpy(EncodeVideoBuffer2 + saved_data_size_filtered, ppkt->data, ppkt->size);
-				saved_data_size += ppkt->size;
+				saved_data_size_filtered += ppkt->size;
 				enc_pkt_size_filtered[enc_frame_num++] = ppkt->size;
 			}
 			av_packet_unref(ppkt);
@@ -6055,13 +6055,89 @@ static int enc_filtered_yuv_to_264()
 			fwrite(ppkt->data, 1, ppkt->size, fp);
 			fclose(fp);
 			memcpy(EncodeVideoBuffer2 + saved_data_size_filtered, ppkt->data, ppkt->size);
-			saved_data_size += ppkt->size;
+			saved_data_size_filtered += ppkt->size;
 			enc_pkt_size_filtered[enc_frame_num++] = ppkt->size;
 		}
 		fprintf(stderr, "flush success filtered yuv to 264\n");
 		av_packet_unref(ppkt);
 	}
 
+	return 0;
+}
+
+static int Decode_Filtered_Encoded_H264_Raw()
+{
+	int len = 0, frame_count = 0;
+	uint8_t *pDataPtr = NULL;
+	size_t uDataSize;
+	FILE *fp = fopen("dec_filtered_enc.yuv", "wb");
+	AVCodecParserContext * pcodecparsctx = NULL;
+	AVFrame *pframe = NULL;
+	AVPacket pkt;
+	uint8_t *inbuf = (uint8_t *)malloc(INBUF_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
+	memset(inbuf, 0, INBUF_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
+	av_init_packet(&pkt);
+	AVCodec *pcodec = avcodec_find_decoder(AV_CODEC_ID_H264);
+	if (!pcodec) {
+		fprintf(stderr, "cannot find the decoder in the filtered encode part\n");
+		exit(1);
+	}
+
+	AVCodecContext *pcodecctx = avcodec_alloc_context3(pcodec);
+	if (!pcodecctx) {
+		fprintf(stderr, "could not allocate video codec context in the filtered encode part\n");
+		exit(1);
+	}
+
+	if (pcodec->capabilities & AV_CODEC_CAP_TRUNCATED) {
+		pcodecctx->flags |= AV_CODEC_FLAG_TRUNCATED;
+	}
+	
+	pcodecparsctx = av_parser_init(AV_CODEC_ID_H264);
+	if (!pcodecparsctx) {
+		fprintf(stderr, "Error: alloc parser fail\n");
+		exit(1);
+	}
+	
+	//open the decoder
+	if (avcodec_open2(pcodecctx, pcodec, NULL) < 0) {
+		fprintf(stderr, "could not open the decoder\n");
+		exit(1);
+	}
+	
+	//open frame structure
+	pframe = av_frame_alloc();
+	if (!pframe) {
+		fprintf(stderr, "could not allocate video frame\n");
+		exit(1);
+	}
+
+	frame_count = 0;
+	//for (;;) {
+		printf("saved_data_size %x\n", saved_data_size_filtered);
+		memcpy(inbuf, EncodeVideoBuffer2, saved_data_size_filtered);
+		pDataPtr = inbuf;
+		uDataSize = saved_data_size_filtered;
+		while(uDataSize > 0) {
+			len = av_parser_parse2(pcodecparsctx, pcodecctx, &(pkt.data), &(pkt.size),
+								pDataPtr, uDataSize, AV_NOPTS_VALUE, AV_NOPTS_VALUE, AV_NOPTS_VALUE);
+			uDataSize -= len;
+			pDataPtr  += len;
+
+			if (pkt.size == 0) {
+				continue;
+			}
+
+			if (decode_write_frame(fp, pcodecctx, pframe, &frame_count, &pkt, 0) < 0) {
+				exit(1);
+			}
+		}
+	//}
+	//decode the data in the decoder itself
+	pkt.size = 0;
+	pkt.data = NULL;
+	decode_write_frame(fp, pcodecctx, pframe, &frame_count, &pkt, 0);
+	fclose(fp);
 	return 0;
 }
 
@@ -6175,9 +6251,9 @@ static int FristPartofPreProcess(char *filename)
 	s->dis = DecodeVideoBuffer;
 	s->num_frames = -1;
 #endif
-	compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
-					1/*disable_clip*/, 1/*disable_avx*/, 0/*enable_transform*/, 0/*phone_model*/, 0/*do_psnr*/, 0/*do_ssim*/, 
-					0/*do_ms_ssim*/, pool_method, 1/*n_thread*/, 1/*n_subsample*/, 0/*enable_conf_interval*/);
+	//compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
+	//				1/*disable_clip*/, 1/*disable_avx*/, 0/*enable_transform*/, 0/*phone_model*/, 0/*do_psnr*/, 0/*do_ssim*/, 
+	//				0/*do_ms_ssim*/, pool_method, 1/*n_thread*/, 1/*n_subsample*/, 0/*enable_conf_interval*/);
 	printf("compute_vmaf done vmaf_score %f\n", vmaf_score);
 	
 	//6. unsharp the decoded yuv data
@@ -6205,8 +6281,13 @@ static int FristPartofPreProcess(char *filename)
 
 		//write the frame to output file
 		write_yuv_to_outfile(frame_out, fp_filter);
-		memcpy(VideoBuffer2 + filtered_frame_num * frame_out->width * frame_out->height * 3 / 2,
-				frame_out->data[0], frame_out->width * frame_out->height * 3 / 2);
+		//memcpy(VideoBuffer2 + filtered_frame_num * frame_out->width * frame_out->height * 3 / 2,
+		//		frame_out->data[0], frame_out->width * frame_out->height * 3 / 2);
+		memcpy(VideoBuffer2 + filtered_frame_num * frame_out->width * frame_out->height * 3 / 2, frame_out->data[0], frame_out->width * frame_out->height);
+		memcpy(VideoBuffer2 + filtered_frame_num * frame_out->width * frame_out->height * 3 / 2 + frame_out->width * frame_out->height,
+				frame_out->data[1], (frame_out->width >> 1) * (frame_out->height >> 1));
+		memcpy(VideoBuffer2 + filtered_frame_num * frame_out->width * frame_out->height * 3 / 2 + frame_out->width * frame_out->height + (frame_out->width >> 1) * (frame_out->height >> 1),
+				frame_out->data[2], (frame_out->width >> 1) * (frame_out->height >> 1));
 		filtered_frame_num++;
 		if (filtered_frame_num == 10) {
 			filtered_frame_num = 0;
@@ -6216,6 +6297,9 @@ static int FristPartofPreProcess(char *filename)
 
 	//7. encode the filtered frame to get the crf
 	enc_filtered_yuv_to_264();
+
+	//8. decode the encoded 264 raw data to yuv
+	Decode_Filtered_Encoded_H264_Raw();
 
 	return ret;
 
