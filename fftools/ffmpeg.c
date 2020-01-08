@@ -4847,13 +4847,14 @@ static void log_callback_null(void *ptr, int level, const char *fmt, va_list vl)
 }
 
 #include <x264.h>
+#include <malloc.h>
 #define MAX_MATRIX_SIZE 63
 #define FHD_BUFFER_SIZE 0x9450C00 //1920*1080*50*3/2
 //uint8_t VideoBuffer[FHD_BUFFER_SIZE];
 //uint8_t EncodeVideoBuffer[1024*1024*10];
 //uint8_t DecodeVideoBuffer[FHD_BUFFER_SIZE];
 
-//uint8_t VideoBuffer2[FHD_BUFFER_SIZE];
+uint8_t VideoBuffer2[FHD_BUFFER_SIZE];
 //uint8_t EncodeVideoBuffer2[1024*1024*10];
 //uint8_t DecodeVideoBuffer2[FHD_BUFFER_SIZE];
 
@@ -5014,10 +5015,6 @@ typedef struct DecEncH264FmtInfo {
 	FILE *outputfp;
 }DecEncH264FmtInfo;
 
-AVFilterContext *buffersink_ctx;
-AVFilterContext *buffersrc_ctx;
-AVFilterGraph *filter_graph;
-
 typedef struct UnsharpFilterInfo
 {
 	int width, height;
@@ -5029,6 +5026,9 @@ typedef struct UnsharpFilterInfo
 	AVFilterContext *buffersink_ctx;
 	AVFilterContext *buffersrc_ctx;
 	AVFilterGraph *filter_graph;
+	AVFilterInOut *outputs;
+	AVFilterInOut *inputs;
+	int filtered_frame_num;
 }UnsharpFilterInfo;
 
 static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int height, int stride, int ref_flag)
@@ -5665,7 +5665,7 @@ static int get_input_fmt(InputStreamInfo **pp_input_stream_info, char *filename)
     }
 
     //dump input information
-    av_dump_format(p_input_stream_info->p_fmt_ctx, 0, filename, 0);
+    //av_dump_format(p_input_stream_info->p_fmt_ctx, 0, filename, 0);
 
     //retrive stream information
     if ((ret = avformat_find_stream_info(p_input_stream_info->p_fmt_ctx, NULL) < 0)) {
@@ -5677,7 +5677,7 @@ static int get_input_fmt(InputStreamInfo **pp_input_stream_info, char *filename)
 }
 
 static int decode_write_frame(FILE *pOutput_File, AVCodecContext *avctx,
-                              AVFrame *frame, int *frame_count, AVPacket *pkt, int last, MemInfo *pmeminfo)
+                              AVFrame *frame, int *frame_count, AVPacket *pkt, int last, MemInfo *pmeminfo, int filtered_flag)
 {
     int i;
     int idx;
@@ -5696,8 +5696,13 @@ static int decode_write_frame(FILE *pOutput_File, AVCodecContext *avctx,
         fflush(stdout);
 
 		//printf("frame_count %d frame->width %d frame->height %d\n", (*frame_count), frame->width, frame->height);
-		memcpy(pmeminfo->pDecodeVideoBuffer + (*frame_count) * frame->width * frame->height * 3 / 2,
-			frame->data[0],	frame->width * frame->height * 3 / 2);
+		if (!filtered_flag) {
+		    memcpy(pmeminfo->pDecodeVideoBuffer + (*frame_count) * frame->width * frame->height * 3 / 2,
+			    frame->data[0],	frame->width * frame->height * 3 / 2);
+		} else {
+			memcpy(pmeminfo->pDecodeVideoBuffer2 + (*frame_count) * frame->width * frame->height * 3 / 2,
+			    frame->data[0],	frame->width * frame->height * 3 / 2);
+		}
 
         //the picture is allocated by the decoder, no need to free it
         (*frame_count)++;
@@ -5773,7 +5778,7 @@ static int decode_encoded_h264_rawdata(DecEncH264FmtInfo *pinfo, MemInfo *pmemin
 			continue;
 		}
 			
-		if(decode_write_frame(pinfo->outputfp, pinfo->codecCtx, pinfo->frame, &frame_count, &(pinfo->pkt), 0, pmeminfo) < 0){
+		if(decode_write_frame(pinfo->outputfp, pinfo->codecCtx, pinfo->frame, &frame_count, &(pinfo->pkt), 0, pmeminfo, 0) < 0){
 			exit(1);
 		}
 	} 
@@ -5781,7 +5786,7 @@ static int decode_encoded_h264_rawdata(DecEncH264FmtInfo *pinfo, MemInfo *pmemin
 	//decode the data in the decoder itself
 	pinfo->pkt.size = 0;
 	pinfo->pkt.data = NULL;
-	decode_write_frame(pinfo->outputfp, pinfo->codecCtx, pinfo->frame, &frame_count, &pinfo->pkt, 0, pmeminfo);
+	decode_write_frame(pinfo->outputfp, pinfo->codecCtx, pinfo->frame, &frame_count, &pinfo->pkt, 0, pmeminfo, 0);
 	saved_data_size = 0;
 	return 0;
 
@@ -5812,23 +5817,23 @@ static int compute_vmaf_prepare(struct newData **s, int *vmaf_width, int *vmaf_h
 	return 0;	
 }
 
-static int init_video_filter(const char *filter_descr, int width, int height)
+static int init_video_filter(const char *filter_descr, int width, int height, UnsharpFilterInfo *pfilterinfo)
 {
 	char args[512];
 
-	AVFilter *buffersrc = avfilter_get_by_name("buffer");
+	AVFilter *buffersrc  = avfilter_get_by_name("buffer");
 	AVFilter *buffersink = avfilter_get_by_name("buffersink");
-	AVFilterInOut *outputs = avfilter_inout_alloc();
-	AVFilterInOut *inputs  = avfilter_inout_alloc();
+	pfilterinfo->outputs = avfilter_inout_alloc();
+	pfilterinfo->inputs  = avfilter_inout_alloc();
 
 	enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE};
 	AVBufferSinkParams *buffersink_params;
 
-	filter_graph = avfilter_graph_alloc();
+	pfilterinfo->filter_graph = avfilter_graph_alloc();
 
 	//buffers video source: the decoded frames from the decoder will be inserted here.
 	snprintf(args, sizeof(args), "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d", width, height, AV_PIX_FMT_YUV420P, 1, 25, 1, 1);
-	int ret = avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in", args, NULL, filter_graph);
+	int ret = avfilter_graph_create_filter(&(pfilterinfo->buffersrc_ctx), buffersrc, "in", args, NULL, pfilterinfo->filter_graph);
 	if (ret < 0) {
 		printf("Error: cannot create buffer source.\n");
 		return ret;
@@ -5838,7 +5843,7 @@ static int init_video_filter(const char *filter_descr, int width, int height)
 	buffersink_params = av_buffersink_params_alloc();
 	buffersink_params->pixel_fmts = pix_fmts;
 
-	ret = avfilter_graph_create_filter(&buffersink_ctx, buffersink, "out", NULL, buffersink_params, filter_graph);;
+	ret = avfilter_graph_create_filter(&(pfilterinfo->buffersink_ctx), buffersink, "out", NULL, buffersink_params, pfilterinfo->filter_graph);;
 	av_free(buffersink_params);
 	if (ret < 0) {
 		printf("error: cannot create buffer sink\n");
@@ -5846,22 +5851,22 @@ static int init_video_filter(const char *filter_descr, int width, int height)
 	}
 
 	//encpoints for the filter graph.
-	outputs->name = av_strdup("in");
-	outputs->filter_ctx = buffersrc_ctx;
-	outputs->pad_idx = 0;
-	outputs->next = NULL;
+	pfilterinfo->outputs->name       = av_strdup("in");
+	pfilterinfo->outputs->filter_ctx = pfilterinfo->buffersrc_ctx;
+	pfilterinfo->outputs->pad_idx    = 0;
+	pfilterinfo->outputs->next       = NULL;
 
-	inputs->name = av_strdup("out");
-	inputs->filter_ctx = buffersink_ctx;
-	inputs->pad_idx = 0;
-	inputs->next = NULL;
+	pfilterinfo->inputs->name       = av_strdup("out");
+	pfilterinfo->inputs->filter_ctx = pfilterinfo->buffersink_ctx;
+	pfilterinfo->inputs->pad_idx    = 0;
+	pfilterinfo->inputs->next       = NULL;
 
-    if ((ret = avfilter_graph_parse_ptr(filter_graph, filter_descr, &inputs, &outputs, NULL)) < 0) {
+    if ((ret = avfilter_graph_parse_ptr(pfilterinfo->filter_graph, filter_descr, &(pfilterinfo->inputs), &(pfilterinfo->outputs), NULL)) < 0) {
         printf("error: avfilter_graph_parse_ptr failed\n");
         return ret;
     }
 
-    if ((ret = avfilter_graph_config(filter_graph, NULL)) < 0) {
+    if ((ret = avfilter_graph_config(pfilterinfo->filter_graph, NULL)) < 0) {
         printf("error: avfilter_graph_config\n");
         return ret;
     }
@@ -5869,17 +5874,17 @@ static int init_video_filter(const char *filter_descr, int width, int height)
     return 0;	
 }
 
-static int add_frame_to_filter(AVFrame *frameIn)
+static int add_frame_to_filter(AVFrame *frameIn, UnsharpFilterInfo *pfilterinfo)
 {
-	if (av_buffersrc_add_frame(buffersrc_ctx, frameIn) < 0) {
+	if (av_buffersrc_add_frame(pfilterinfo->buffersrc_ctx, frameIn) < 0) {
 		return 0;
 	}
 	return 1;
 }
 
-static int get_frame_from_filter(AVFrame **frameOut)
+static int get_frame_from_filter(AVFrame **frameOut, UnsharpFilterInfo *pfilterinfo)
 {
-	if (av_buffersink_get_frame(buffersink_ctx, *frameOut) < 0){
+	if (av_buffersink_get_frame(pfilterinfo->buffersink_ctx, *frameOut) < 0){
 		return 0;
 	}
 	return 1;
@@ -5939,7 +5944,65 @@ static void write_yuv_to_outfile(const AVFrame *frame_out, FILE *fp)
 	}
 }
 
-static int enc_filtered_yuv_to_264(MemInfo *pmeminfo)
+static int unsharp_decoded_yuv(UnsharpFilterInfo *pfilterinfo, const MemInfo *pmeminfo, const InputStreamInfo *p_input_stream_info, FILE *fp_filter)
+{
+	int ret = 0;
+	int frameWidth  = p_input_stream_info->p_frame->width;
+	int frameHeight = p_input_stream_info->p_frame->height;
+	printf("filter_descr %s frameWidth %d frameHeight %d\n", pfilterinfo->filter_descr, frameWidth, frameHeight);
+	if (ret = init_video_filter(pfilterinfo->filter_descr, frameWidth, frameHeight, pfilterinfo)) {
+		return ret;
+	};
+
+	init_video_frame_in_out(&(pfilterinfo->frame_in), &(pfilterinfo->frame_out), &(pfilterinfo->frame_buffer_in), &(pfilterinfo->frame_buffer_out), frameWidth, frameHeight);
+
+	while (read_yuv_data_to_buf(pfilterinfo->frame_buffer_in, pmeminfo->pVideoBuffer, &(pfilterinfo->frame_in), frameWidth, frameHeight)) {
+		//add frame to filter graph
+		if (!add_frame_to_filter((pfilterinfo->frame_in), pfilterinfo)) {
+			printf("error: while adding frame\n");
+			goto end;
+		}
+
+		//get frame from filter graph
+		if (!get_frame_from_filter(&(pfilterinfo->frame_out), pfilterinfo)) {
+			printf("error: while getting frame\n");
+			goto end;
+		}
+
+		//write the frame to output file
+		write_yuv_to_outfile(pfilterinfo->frame_out, fp_filter);
+		memcpy(pmeminfo->pVideoBuffer2 + pfilterinfo->filtered_frame_num * pfilterinfo->frame_out->width * pfilterinfo->frame_out->height * 3 / 2, 
+				pfilterinfo->frame_out->data[0], 
+				pfilterinfo->frame_out->width * pfilterinfo->frame_out->height);
+		memcpy(pmeminfo->pVideoBuffer2 + pfilterinfo->filtered_frame_num * pfilterinfo->frame_out->width * pfilterinfo->frame_out->height * 3 / 2 + pfilterinfo->frame_out->width * pfilterinfo->frame_out->height,
+				pfilterinfo->frame_out->data[1], 
+				(pfilterinfo->frame_out->width >> 1) * (pfilterinfo->frame_out->height >> 1));
+		memcpy(pmeminfo->pVideoBuffer2 + pfilterinfo->filtered_frame_num * pfilterinfo->frame_out->width * pfilterinfo->frame_out->height * 3 / 2 + pfilterinfo->frame_out->width * pfilterinfo->frame_out->height + (pfilterinfo->frame_out->width >> 1) * (pfilterinfo->frame_out->height >> 1),
+				pfilterinfo->frame_out->data[2], 
+				(pfilterinfo->frame_out->width >> 1) * (pfilterinfo->frame_out->height >> 1));
+		pfilterinfo->filtered_frame_num++;
+		if (pfilterinfo->filtered_frame_num == 10) {
+			pfilterinfo->filtered_frame_num = 0;
+			break;
+		}
+	}
+
+	avfilter_graph_free(&(pfilterinfo->filter_graph));
+	avfilter_inout_free(&(pfilterinfo->outputs));
+	avfilter_inout_free(&(pfilterinfo->inputs));
+	av_frame_free(&(pfilterinfo->frame_in));
+	av_frame_free(&(pfilterinfo->frame_out));
+	av_free(pfilterinfo->frame_buffer_in);
+	av_free(pfilterinfo->frame_buffer_out);
+
+	return 0;
+end:
+	av_frame_free(&(pfilterinfo->frame_in));
+	av_frame_free(&(pfilterinfo->frame_out));
+	return 0;
+}
+
+static int enc_filtered_yuv_to_264(MemInfo *pmeminfo, float crf_val)
 {
 	int ret = 0;
 	static int enc_frame_num = 0;
@@ -6016,7 +6079,7 @@ static int enc_filtered_yuv_to_264(MemInfo *pmeminfo)
 		pframe->pts = i;
 
 		x4 = pcodecCtx->priv_data;
-		x4->params.rc.f_rf_constant = x4->crf = 30;
+		x4->params.rc.f_rf_constant = x4->crf = (float)crf_val;
 		x264_encoder_reconfig(x4->enc, &(x4->params));
 
 		//encode the image
@@ -6075,9 +6138,16 @@ static int enc_filtered_yuv_to_264(MemInfo *pmeminfo)
 			saved_data_size_filtered += ppkt->size;
 			enc_pkt_size_filtered[enc_frame_num++] = ppkt->size;
 		}
-		fprintf(stderr, "flush success filtered yuv to 264\n");
 		av_packet_unref(ppkt);
 	}
+	fprintf(stderr, "flush success filtered yuv to 264\n");
+
+
+	//uninit the encoder
+	av_packet_free(&ppkt);
+	av_frame_free(&pframe);
+	avcodec_close(pcodecCtx);
+	avcodec_free_context(&pcodecCtx);
 
 	return 0;
 }
@@ -6130,31 +6200,40 @@ static int decode_filtered_encoded_h264_rawdata(MemInfo *pmeminfo)
 	}
 
 	frame_count = 0;
-	//for (;;) {
-		printf("saved_data_size %x\n", saved_data_size_filtered);
-		memcpy(inbuf, pmeminfo->pEncodeVideoBuffer2, saved_data_size_filtered);
-		pDataPtr  = inbuf;
-		uDataSize = saved_data_size_filtered;
-		while (uDataSize > 0) {
-			len = av_parser_parse2(pcodecparsctx, pcodecctx, &(pkt.data), &(pkt.size),
-								pDataPtr, uDataSize, AV_NOPTS_VALUE, AV_NOPTS_VALUE, AV_NOPTS_VALUE);
-			uDataSize -= len;
-			pDataPtr  += len;
 
-			if (pkt.size == 0) {
-				continue;
-			}
+	printf("saved_data_size %x\n", saved_data_size_filtered);
+	memcpy(inbuf, pmeminfo->pEncodeVideoBuffer2, saved_data_size_filtered);
+	pDataPtr  = inbuf;
+	uDataSize = saved_data_size_filtered;
+	while (uDataSize > 0) {
+		len = av_parser_parse2(pcodecparsctx, pcodecctx, &(pkt.data), &(pkt.size),
+							pDataPtr, uDataSize, AV_NOPTS_VALUE, AV_NOPTS_VALUE, AV_NOPTS_VALUE);
+		uDataSize -= len;
+		pDataPtr  += len;
 
-			if (decode_write_frame(fp, pcodecctx, pframe, &frame_count, &pkt, 0, pmeminfo) < 0) {
-				exit(1);
-			}
+		if (pkt.size == 0) {
+			continue;
 		}
-	//}
+
+		if (decode_write_frame(fp, pcodecctx, pframe, &frame_count, &pkt, 0, pmeminfo, 1) < 0) {
+			exit(1);
+		}
+	}
+
 	//decode the data in the decoder itself
 	pkt.size = 0;
 	pkt.data = NULL;
-	decode_write_frame(fp, pcodecctx, pframe, &frame_count, &pkt, 0, pmeminfo);
+	decode_write_frame(fp, pcodecctx, pframe, &frame_count, &pkt, 0, pmeminfo, 1);
+
+	//uninit the decoder
 	fclose(fp);
+	av_frame_free(&pframe);
+	avcodec_close(pcodecctx);
+	av_parser_close(pcodecparsctx);
+	avcodec_free_context(&pcodecctx);
+	free(inbuf);
+	inbuf = NULL;	
+	
 	return 0;
 }
 
@@ -6175,6 +6254,7 @@ static int FristPartofPreProcess(char *filename)
     EncodeInfo encinfo;
     InputParams inputpar;
 	DecEncH264FmtInfo Dec264FmtInfo;
+	UnsharpFilterInfo filterinfo = {0};
 
 	MemInfo meminfo;
 
@@ -6183,11 +6263,7 @@ static int FristPartofPreProcess(char *filename)
 	AVFrame *frame_out = NULL;
 	unsigned char *frame_buffer_in  = NULL;
 	unsigned char *frame_buffer_out = NULL;
-	char *filter_descr = "unsharp=luma_msize_x=7:luma_msize_y=7:luma_amount=-1.0";
 	int frameWidth, frameHeight = 0;
-	AVFilterContext *buffersink_ctx;
-	AVFilterContext *buffersrc_ctx;
-	AVFilterGraph   *filter_graph;
 	int filtered_frame_num = 0;
 
 	Dec264FmtInfo.outputfp = (FILE *)fopen("./end.yuv", "wb");
@@ -6197,14 +6273,15 @@ static int FristPartofPreProcess(char *filename)
     inputpar.video_dst_file = (FILE *)fopen("./output.yuv", "wb");
 
 	FILE *fp_filter = (FILE *)fopen("./filter.yuv", "wb+");
+	filterinfo.filter_descr = "unsharp=luma_msize_x=7:luma_msize_y=7:luma_amount=-1.0";
 
 	//allocate meminfo
 	meminfo.pVideoBuffer 		= (uint8_t *)malloc(FHD_BUFFER_SIZE);
 	meminfo.pEncodeVideoBuffer 	= (uint8_t *)malloc(1024*1024*10);
 	meminfo.pDecodeVideoBuffer 	= (uint8_t *)malloc(FHD_BUFFER_SIZE);
-	meminfo.pVideoBuffer2		= (uint8_t *)malloc(FHD_BUFFER_SIZE);
+	meminfo.pVideoBuffer2		= (uint8_t *)malloc(FHD_BUFFER_SIZE / 5);
 	meminfo.pEncodeVideoBuffer2 = (uint8_t *)malloc(1024*1024*10);
-	meminfo.pDecodeVideoBuffer2 = (uint8_t *)malloc(FHD_BUFFER_SIZE);
+	meminfo.pDecodeVideoBuffer2 = (uint8_t *)malloc(FHD_BUFFER_SIZE / 5);
 
     InputStreamInfo *p_input_stream_info = (InputStreamInfo *)malloc(sizeof(InputStreamInfo));
     if (!p_input_stream_info) {
@@ -6236,7 +6313,7 @@ static int FristPartofPreProcess(char *filename)
         return ret;
     }
 
-	for (int crf = 18; crf <= 34; crf++) {
+	for (int crf = 18; crf <= 18; crf++) {
 		printf("crf %d\n", crf);
 		//3. encode the yuv data decoded in part 2 to h264 file, using crf 18..
         if ((ret = encode_prepare(p_input_stream_info, &encinfo, &decinfo)) < 0) {
@@ -6265,9 +6342,9 @@ static int FristPartofPreProcess(char *filename)
     	//printf("start to compute the vmaf value\n");
     	//if (s == NULL)
     	compute_vmaf_prepare(&s, &vmaf_width, &vmaf_height, &Dec264FmtInfo, &meminfo);
-		compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
-        				1/*disable_clip*/, 1/*disable_avx*/, 0/*enable_transform*/, 0/*phone_model*/, 0/*do_psnr*/, 0/*do_ssim*/, 
-        				0/*do_ms_ssim*/, pool_method, 1/*n_thread*/, 1/*n_subsample*/, 0/*enable_conf_interval*/);
+		//compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
+        //				1/*disable_clip*/, 1/*disable_avx*/, 0/*enable_transform*/, 0/*phone_model*/, 0/*do_psnr*/, 0/*do_ssim*/, 
+        //				0/*do_ms_ssim*/, pool_method, 1/*n_thread*/, 1/*n_subsample*/, 0/*enable_conf_interval*/);
 		free(s);
 		s = NULL;
 
@@ -6280,53 +6357,59 @@ static int FristPartofPreProcess(char *filename)
 
 		printf("compute_vmaf done vmaf_score %f\n", vmaf_score);
 	}
-	exit(1);
+	//exit(1);
 	//6. unsharp the decoded yuv data
 	//init filter struct
+	for (int crf = 18; crf < 32; crf++) {
+    #if 1
+    	unsharp_decoded_yuv(&filterinfo, &meminfo, p_input_stream_info, fp_filter);
+    #else
+    	frameWidth  = p_input_stream_info->p_frame->width;
+    	frameHeight = p_input_stream_info->p_frame->height;
+    	if (ret = init_video_filter(filterinfo.filter_descr, frameWidth, frameHeight, &filterinfo)) {
+    		return ret;
+    	};
 
-	//unsharp_decoded_yuv(filter_descr, frameWidth, frameHeight, frame_in, frame_out, );
-	
-	frameWidth  = Dec264FmtInfo.frame->width;
-	frameHeight = Dec264FmtInfo.frame->height;
-	if (ret = init_video_filter(filter_descr, frameWidth, frameHeight)) {
-		return ret;
-	};
+    	init_video_frame_in_out(&(filterinfo.frame_in), &(filterinfo.frame_out), &(filterinfo.frame_buffer_in), &(filterinfo.frame_buffer_out), frameWidth, frameHeight);
 
-	init_video_frame_in_out(&frame_in, &frame_out, &frame_buffer_in, &frame_buffer_out, frameWidth, frameHeight);
+    	while (read_yuv_data_to_buf(filterinfo.frame_buffer_in, meminfo.pVideoBuffer, &(filterinfo.frame_in), frameWidth, frameHeight)) {
+    		//add frame to filter graph
+    		if (!add_frame_to_filter(filterinfo.frame_in, &filterinfo)) {
+    			printf("error: while adding frame\n");
+    			goto end;
+    		}
+    
+    		//get frame from filter graph
+    		if (!get_frame_from_filter(&(filterinfo.frame_out), &filterinfo)) {
+    			printf("error: while getting frame\n");
+    			goto end;
+    		}
 
-	while (read_yuv_data_to_buf(frame_buffer_in, meminfo.pVideoBuffer, &frame_in, frameWidth, frameHeight)) {
-		//add frame to filter graph
-		if (!add_frame_to_filter(frame_in)) {
-			printf("error: while adding frame\n");
-			goto end;
-		}
+    		//write the frame to output file
+    		write_yuv_to_outfile(filterinfo.frame_out, fp_filter);
 
-		//get frame from filter graph
-		if (!get_frame_from_filter(&frame_out)) {
-			printf("error: while getting frame\n");
-			goto end;
-		}
-
-		//write the frame to output file
-		write_yuv_to_outfile(frame_out, fp_filter);
-		memcpy(meminfo.pVideoBuffer2 + filtered_frame_num * frame_out->width * frame_out->height * 3 / 2, frame_out->data[0], frame_out->width * frame_out->height);
-		memcpy(meminfo.pVideoBuffer2 + filtered_frame_num * frame_out->width * frame_out->height * 3 / 2 + frame_out->width * frame_out->height,
-				frame_out->data[1], (frame_out->width >> 1) * (frame_out->height >> 1));
-		memcpy(meminfo.pVideoBuffer2 + filtered_frame_num * frame_out->width * frame_out->height * 3 / 2 + frame_out->width * frame_out->height + (frame_out->width >> 1) * (frame_out->height >> 1),
-				frame_out->data[2], (frame_out->width >> 1) * (frame_out->height >> 1));
-		filtered_frame_num++;
-		if (filtered_frame_num == 10) {
-			filtered_frame_num = 0;
-			break;
-		}
+			memcpy(meminfo.pVideoBuffer2 + filtered_frame_num * (filterinfo.frame_out->width) * filterinfo.frame_out->height * 3 / 2, 
+					filterinfo.frame_out->data[0], 
+					filterinfo.frame_out->width * filterinfo.frame_out->height);
+    		memcpy(meminfo.pVideoBuffer2 + filtered_frame_num * filterinfo.frame_out->width * filterinfo.frame_out->height * 3 / 2 + filterinfo.frame_out->width * filterinfo.frame_out->height,
+    				filterinfo.frame_out->data[1], 
+    				(filterinfo.frame_out->width >> 1) * (filterinfo.frame_out->height >> 1));
+    		memcpy(meminfo.pVideoBuffer2 + filtered_frame_num * filterinfo.frame_out->width * filterinfo.frame_out->height * 3 / 2 + filterinfo.frame_out->width * filterinfo.frame_out->height + (filterinfo.frame_out->width >> 1) * (filterinfo.frame_out->height >> 1),
+    				filterinfo.frame_out->data[2], 
+    				(filterinfo.frame_out->width >> 1) * (filterinfo.frame_out->height >> 1));
+    		filtered_frame_num++;
+    		if (filtered_frame_num == 10) {
+    			filtered_frame_num = 0;
+    			break;
+    		}
+    	}
+    #endif
+    	//7. encode the filtered frame to get the crf
+    	enc_filtered_yuv_to_264(&meminfo, (float)(crf));
+    
+    	//8. decode the encoded 264 raw data to yuv
+    	decode_filtered_encoded_h264_rawdata(&meminfo);
 	}
-
-	//7. encode the filtered frame to get the crf
-	enc_filtered_yuv_to_264(&meminfo);
-
-	//8. decode the encoded 264 raw data to yuv
-	decode_filtered_encoded_h264_rawdata(&meminfo);
-
 	return ret;
 
 end:
