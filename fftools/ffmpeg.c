@@ -5792,7 +5792,7 @@ static int decode_encoded_h264_rawdata(DecEncH264FmtInfo *pinfo, MemInfo *pmemin
 
 }
 
-static int compute_vmaf_prepare(struct newData **s, int *vmaf_width, int *vmaf_height, DecEncH264FmtInfo *Dec264FmtInfo, MemInfo *pmeminfo)
+static int compute_vmaf_prepare(struct newData **s, int *vmaf_width, int *vmaf_height, DecEncH264FmtInfo *Dec264FmtInfo, const MemInfo *pmeminfo)
 {
 	int ret = 0;
 	struct newData *ps = (struct newData *)malloc(sizeof(struct newData));
@@ -6259,8 +6259,6 @@ static int FristPartofPreProcess(char *filename)
 	MemInfo meminfo;
 
 	//filter part
-	AVFrame *frame_in = NULL;
-	AVFrame *frame_out = NULL;
 	unsigned char *frame_buffer_in  = NULL;
 	unsigned char *frame_buffer_out = NULL;
 	int frameWidth, frameHeight = 0;
@@ -6314,7 +6312,6 @@ static int FristPartofPreProcess(char *filename)
     }
 
 	for (int crf = 18; crf <= 18; crf++) {
-		printf("crf %d\n", crf);
 		//3. encode the yuv data decoded in part 2 to h264 file, using crf 18..
         if ((ret = encode_prepare(p_input_stream_info, &encinfo, &decinfo)) < 0) {
             fprintf(stderr, "Eagle: encode prepare fail\n");
@@ -6334,12 +6331,10 @@ static int FristPartofPreProcess(char *filename)
     	//4. decode the encoded pkt to yuv
     	if ((ret = decode_encoded_h264_rawdata(&Dec264FmtInfo, &meminfo)) != 0){
     		fprintf(stderr, "decode error fail\n");
-    		return 0;
-    	} else {
-		}
+    		return ret;
+    	}
 
     	//5. compare the yuv decoded from 4 and 2, to get the target score
-    	//printf("start to compute the vmaf value\n");
     	//if (s == NULL)
     	compute_vmaf_prepare(&s, &vmaf_width, &vmaf_height, &Dec264FmtInfo, &meminfo);
 		//compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
@@ -6357,65 +6352,21 @@ static int FristPartofPreProcess(char *filename)
 
 		printf("compute_vmaf done vmaf_score %f\n", vmaf_score);
 	}
-	//exit(1);
-	//6. unsharp the decoded yuv data
-	//init filter struct
+
 	for (int crf = 18; crf < 32; crf++) {
-    #if 1
-    	unsharp_decoded_yuv(&filterinfo, &meminfo, p_input_stream_info, fp_filter);
-    #else
-    	frameWidth  = p_input_stream_info->p_frame->width;
-    	frameHeight = p_input_stream_info->p_frame->height;
-    	if (ret = init_video_filter(filterinfo.filter_descr, frameWidth, frameHeight, &filterinfo)) {
-    		return ret;
-    	};
+		//6. unsharp the decoded yuv data
+    	ret = unsharp_decoded_yuv(&filterinfo, &meminfo, p_input_stream_info, fp_filter);
 
-    	init_video_frame_in_out(&(filterinfo.frame_in), &(filterinfo.frame_out), &(filterinfo.frame_buffer_in), &(filterinfo.frame_buffer_out), frameWidth, frameHeight);
-
-    	while (read_yuv_data_to_buf(filterinfo.frame_buffer_in, meminfo.pVideoBuffer, &(filterinfo.frame_in), frameWidth, frameHeight)) {
-    		//add frame to filter graph
-    		if (!add_frame_to_filter(filterinfo.frame_in, &filterinfo)) {
-    			printf("error: while adding frame\n");
-    			goto end;
-    		}
-    
-    		//get frame from filter graph
-    		if (!get_frame_from_filter(&(filterinfo.frame_out), &filterinfo)) {
-    			printf("error: while getting frame\n");
-    			goto end;
-    		}
-
-    		//write the frame to output file
-    		write_yuv_to_outfile(filterinfo.frame_out, fp_filter);
-
-			memcpy(meminfo.pVideoBuffer2 + filtered_frame_num * (filterinfo.frame_out->width) * filterinfo.frame_out->height * 3 / 2, 
-					filterinfo.frame_out->data[0], 
-					filterinfo.frame_out->width * filterinfo.frame_out->height);
-    		memcpy(meminfo.pVideoBuffer2 + filtered_frame_num * filterinfo.frame_out->width * filterinfo.frame_out->height * 3 / 2 + filterinfo.frame_out->width * filterinfo.frame_out->height,
-    				filterinfo.frame_out->data[1], 
-    				(filterinfo.frame_out->width >> 1) * (filterinfo.frame_out->height >> 1));
-    		memcpy(meminfo.pVideoBuffer2 + filtered_frame_num * filterinfo.frame_out->width * filterinfo.frame_out->height * 3 / 2 + filterinfo.frame_out->width * filterinfo.frame_out->height + (filterinfo.frame_out->width >> 1) * (filterinfo.frame_out->height >> 1),
-    				filterinfo.frame_out->data[2], 
-    				(filterinfo.frame_out->width >> 1) * (filterinfo.frame_out->height >> 1));
-    		filtered_frame_num++;
-    		if (filtered_frame_num == 10) {
-    			filtered_frame_num = 0;
-    			break;
-    		}
-    	}
-    #endif
     	//7. encode the filtered frame to get the crf
-    	enc_filtered_yuv_to_264(&meminfo, (float)(crf));
+    	ret = enc_filtered_yuv_to_264(&meminfo, (float)(crf));
     
     	//8. decode the encoded 264 raw data to yuv
-    	decode_filtered_encoded_h264_rawdata(&meminfo);
+    	ret = decode_filtered_encoded_h264_rawdata(&meminfo);
+
+		//9. compute the vmaf and determine the finally crf value
 	}
 	return ret;
 
-end:
-	av_frame_free(&frame_in);
-	av_frame_free(&frame_out);
-	return 0;
 }
 
 int main(int argc, char **argv)
