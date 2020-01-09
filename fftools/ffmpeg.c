@@ -5058,6 +5058,7 @@ static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int
 			memcpy(tmp_buf, data + DECODE_FRAME_NUM_PER_GOP*width*height*3/2 - reserved_ref + i * width, width);
 		else
 			memcpy(tmp_buf, data + DECODE_FRAME_NUM_PER_GOP*width*height*3/2 - reserved_dis + i * width, width);
+
 		for (j = 0; j < width; j++)
 			row_ptr[j] = tmp_buf[j] + off;
 
@@ -5790,13 +5791,16 @@ static int decode_encoded_h264_rawdata(DecEncH264FmtInfo *pinfo, MemInfo *pmemin
 	return 0;
 }
 
-static int compute_vmaf_prepare(struct newData **s, int *vmaf_width, int *vmaf_height, DecEncH264FmtInfo *Dec264FmtInfo, const MemInfo *pmeminfo)
+static int compute_vmaf_prepare(struct newData **s, int *vmaf_width, int *vmaf_height, 
+										const int width, const int height,
+										const uint8_t *ref, const uint8_t *dis)
+							//DecEncH264FmtInfo *Dec264FmtInfo, const MemInfo *pmeminfo)
 {
 	int ret = 0;
 	struct newData *ps = (struct newData *)malloc(sizeof(struct newData));
 	ps->format   = "yuv420p";
-	*vmaf_width  = Dec264FmtInfo->frame->width;
-	*vmaf_height = Dec264FmtInfo->frame->height;
+	*vmaf_width  = width;
+	*vmaf_height = height;
 	ps->width =  *vmaf_width;
 	ps->height = *vmaf_height;
 	if (!strcmp(ps->format, "yuv420p")) {
@@ -5807,8 +5811,8 @@ static int compute_vmaf_prepare(struct newData **s, int *vmaf_width, int *vmaf_h
 		}
 		ps->offset = (*vmaf_width) * (*vmaf_height) >> 1;
 	}
-	ps->ref = pmeminfo->pVideoBuffer;
-	ps->dis = pmeminfo->pDecodeVideoBuffer;
+	ps->ref = ref;
+	ps->dis = dis;
 	ps->num_frames = -1;
 	*s = ps;
 
@@ -6242,6 +6246,7 @@ static int decode_filtered_encoded_h264_rawdata(MemInfo *pmeminfo)
 //decode the mp4 format h264 codec to yuv,
 static int FristPartofPreProcess(char *filename)
 {
+	int end_of_file = 0;
 	const char *fmt = "yuv420p";
 	char *log_file = "./log.txt";
 	int vmaf_width, vmaf_height;
@@ -6265,6 +6270,7 @@ static int FristPartofPreProcess(char *filename)
 	unsigned char *frame_buffer_out = NULL;
 	int frameWidth, frameHeight = 0;
 	int filtered_frame_num = 0;
+	long long sharpness = 0;
 
 	Dec264FmtInfo.outputfp = (FILE *)fopen("./end.yuv", "wb");
 	if (Dec264FmtInfo.outputfp == NULL) {
@@ -6308,71 +6314,131 @@ static int FristPartofPreProcess(char *filename)
         return ret;
     }
 
-	for (int gop_num = 0; gop_num <= 10; gop_num++) {
-		printf("gop_num %d\n",gop_num);
-	    if ((ret = decode_packet(p_input_stream_info, &decinfo, &inputpar, &meminfo)) < 0) {
-	        fprintf(stderr, "Eagle: decode packet fail\n");
-	        return ret;
-	    }
+DECODE_ORG_BITS:
+	while (av_read_frame(p_input_stream_info->p_fmt_ctx, p_input_stream_info->p_pkt) <= 0) {
+		do {
+			if (p_input_stream_info->p_pkt->stream_index == p_input_stream_info->video_stream_idx) {
+				ret = avcodec_send_packet(p_input_stream_info->p_video_codecctx, p_input_stream_info->p_pkt);
+				if (ret != 0) {
+					fprintf(stderr, "Eagle: Error sending a packet for decoding\n");
+					return ret;
+				}
 
-		for (int crf = 18; crf <= 19; crf++) {
-			//3. encode the yuv data decoded in part 2 to h264 file, using crf 18..
-	        if ((ret = encode_prepare(p_input_stream_info, &encinfo, &decinfo)) < 0) {
-	            fprintf(stderr, "Eagle: encode prepare fail\n");
-	            return ret;
-	        }
+				while (ret >= 0) {
+					ret = avcodec_receive_frame(p_input_stream_info->p_video_codecctx, p_input_stream_info->p_frame);
+					if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+						break;
+					} else if (ret < 0) {
+						fprintf(stderr, "Eagle: Error during decoding\n");
+						break;
+					}
 
-			if ((ret = encode_frame(p_input_stream_info, &encinfo, (float)crf, 0, &meminfo)) < 0) {
-	    		fprintf(stderr, "Eagle: encode frame fail\n");
-	    		return ret;
-	    	}
-
-			avcodec_close(encinfo.codecCtx);
-			avcodec_free_context(&(encinfo.codecCtx));
-			av_frame_free(&(encinfo.frame));
-			av_packet_free(&(encinfo.p_pkt));
-		
-	    	//4. decode the encoded pkt to yuv
-	    	if ((ret = decode_encoded_h264_rawdata(&Dec264FmtInfo, &meminfo)) != 0){
-	    		fprintf(stderr, "decode error fail\n");
-	    		return ret;
-	    	}
-
-	    	//5. compare the yuv decoded from 4 and 2, to get the target score
-	    	//if (s == NULL)
-	    	compute_vmaf_prepare(&s, &vmaf_width, &vmaf_height, &Dec264FmtInfo, &meminfo);
-			compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
-	        				1/*disable_clip*/, 1/*disable_avx*/, 0/*enable_transform*/, 0/*phone_model*/, 0/*do_psnr*/, 0/*do_ssim*/, 
-	        				0/*do_ms_ssim*/, pool_method, 0/*n_thread*/, 5/*n_subsample*/, 0/*enable_conf_interval*/);
-			free(s);
-			s = NULL;
-
-			av_frame_free(&(Dec264FmtInfo.frame));
-			avcodec_close(Dec264FmtInfo.codecCtx);
-			av_parser_close(Dec264FmtInfo.pCodecParserCtx);
-			avcodec_free_context(&(Dec264FmtInfo.codecCtx));
-			free(Dec264FmtInfo.inbuf);
-			Dec264FmtInfo.inbuf = NULL;
-
-			printf("compute_vmaf done vmaf_score %f saved_data_size %d\n", vmaf_score, saved_data_size);
-			saved_data_size = 0;
-		}
-
-		for (int crf = 18; crf < 19; crf++) {
-			//6. unsharp the decoded yuv data
-	    	ret = unsharp_decoded_yuv(&filterinfo, &meminfo, p_input_stream_info, fp_filter);
-
-	    	//7. encode the filtered frame to get the crf
-	    	ret = enc_filtered_yuv_to_264(&meminfo, (float)(crf), p_input_stream_info);
-	    
-	    	//8. decode the encoded 264 raw data to yuv
-	    	ret = decode_filtered_encoded_h264_rawdata(&meminfo);
-
-			//9. compute the vmaf and determine the finally crf value
-		}
+					av_image_copy(decinfo.video_dst_data, decinfo.video_dst_linesize,
+								  (const uint8_t *)(p_input_stream_info->p_frame->data),
+								  p_input_stream_info->p_frame->linesize,
+								  decinfo.pix_fmt, decinfo.width, decinfo.height);
+					sharpness = get_unsharp_val(decinfo.video_dst_data[0],
+									decinfo.width, decinfo.height, 1.0, 5, 5);
+					fwrite(decinfo.video_dst_data[0], 1, decinfo.video_dst_bufsize, inputpar.video_dst_file);
+					if (framenum < DECODE_FRAME_NUM_PER_GOP) {
+						memcpy(meminfo.pVideoBuffer + framenum * decinfo.width * decinfo.height * 3 / 2,
+								decinfo.video_dst_data[0], decinfo.width * decinfo.height * 3 / 2);
+					} else if (framenum >= MIN_NUM_OF_PER_GOP) {
+						p_input_stream_info->p_pkt->size = 0;
+						p_input_stream_info->p_pkt->data += p_input_stream_info->p_pkt->size;
+						framenum = 0;
+						goto NEXT;
+					}
+					framenum++;
+					break;
+				}
+			}else if (p_input_stream_info->p_pkt->stream_index == p_input_stream_info->audio_stream_idx) {
+				//donnot handle audio stream
+			}
+			ret = p_input_stream_info->p_pkt->size;
+			p_input_stream_info->p_pkt->size -= ret;
+			p_input_stream_info->p_pkt->data += ret;
+		} while (p_input_stream_info->p_pkt->size > 0);
 	}
-	return ret;
 
+	end_of_file = 1;
+
+NEXT:
+	for (int crf = 18; crf <= 19; crf++) {
+		//3. encode the yuv data decoded in part 2 to h264 file, using crf 18..
+        if ((ret = encode_prepare(p_input_stream_info, &encinfo, &decinfo)) < 0) {
+            fprintf(stderr, "Eagle: encode prepare fail\n");
+            return ret;
+        }
+
+		if ((ret = encode_frame(p_input_stream_info, &encinfo, (float)crf, 0, &meminfo)) < 0) {
+    		fprintf(stderr, "Eagle: encode frame fail\n");
+    		return ret;
+    	}
+
+		avcodec_close(encinfo.codecCtx);
+		avcodec_free_context(&(encinfo.codecCtx));
+		av_frame_free(&(encinfo.frame));
+		av_packet_free(&(encinfo.p_pkt));
+	
+    	//4. decode the encoded pkt to yuv
+    	if ((ret = decode_encoded_h264_rawdata(&Dec264FmtInfo, &meminfo)) != 0){
+    		fprintf(stderr, "decode error fail\n");
+    		return ret;
+    	}
+
+    	//5. compare the yuv decoded from 4 and 2, to get the target score
+    	//if (s == NULL)
+    	compute_vmaf_prepare(&s, &vmaf_width, &vmaf_height, 
+    						Dec264FmtInfo.frame->width, Dec264FmtInfo.frame->height, 
+    						meminfo.pVideoBuffer, meminfo.pDecodeVideoBuffer);
+		compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
+        				1/*disable_clip*/, 1/*disable_avx*/, 0/*enable_transform*/, 0/*phone_model*/, 0/*do_psnr*/, 0/*do_ssim*/, 
+        				0/*do_ms_ssim*/, pool_method, 0/*n_thread*/, 5/*n_subsample*/, 0/*enable_conf_interval*/);
+		printf("stage 1 vmaf_score %f\n", vmaf_score);
+		free(s);
+		s = NULL;
+
+		av_frame_free(&(Dec264FmtInfo.frame));
+		avcodec_close(Dec264FmtInfo.codecCtx);
+		av_parser_close(Dec264FmtInfo.pCodecParserCtx);
+		avcodec_free_context(&(Dec264FmtInfo.codecCtx));
+		free(Dec264FmtInfo.inbuf);
+		Dec264FmtInfo.inbuf = NULL;
+
+		printf("compute_vmaf done vmaf_score %f saved_data_size %d\n", vmaf_score, saved_data_size);
+		saved_data_size = 0;
+	}
+
+	for (int crf = 18; crf < 19; crf++) {
+		//6. unsharp the decoded yuv data
+    	ret = unsharp_decoded_yuv(&filterinfo, &meminfo, p_input_stream_info, fp_filter);
+
+    	//7. encode the filtered frame to get the crf
+    	ret = enc_filtered_yuv_to_264(&meminfo, (float)(crf), p_input_stream_info);
+    
+    	//8. decode the encoded 264 raw data to yuv
+    	ret = decode_filtered_encoded_h264_rawdata(&meminfo);
+
+		//9. compute the vmaf and determine the finally crf value
+		printf("width %d hegith %d\n");
+    	compute_vmaf_prepare(&s, &vmaf_width, &vmaf_height, 
+    						p_input_stream_info->p_frame->width, p_input_stream_info->p_frame->height, 
+    						meminfo.pVideoBuffer2, meminfo.pDecodeVideoBuffer2);
+		compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
+        				1/*disable_clip*/, 1/*disable_avx*/, 0/*enable_transform*/, 0/*phone_model*/, 0/*do_psnr*/, 0/*do_ssim*/, 
+        				0/*do_ms_ssim*/, pool_method, 0/*n_thread*/, 5/*n_subsample*/, 0/*enable_conf_interval*/);
+		printf("stage 2 vmaf_score %f\n", vmaf_score);
+		free(s);
+		s = NULL;
+	}
+
+	if (end_of_file)
+		return ret;
+	else
+		goto DECODE_ORG_BITS;
+
+	return ret;
 }
 
 int main(int argc, char **argv)
