@@ -6286,11 +6286,13 @@ static int FristPartofPreProcess(char *filename)
     }
 
 DECODE_ORG_BITS:
-	while (av_read_frame(p_input_stream_info->p_fmt_ctx, p_input_stream_info->p_pkt) <= 0) {
+	while (av_read_frame(p_input_stream_info->p_fmt_ctx, p_input_stream_info->p_pkt) >= 0) {
 		do {
 			if (p_input_stream_info->p_pkt->stream_index == p_input_stream_info->video_stream_idx) {
 				ret = avcodec_send_packet(p_input_stream_info->p_video_codecctx, p_input_stream_info->p_pkt);
 				if (ret != 0) {
+					fprintf(stderr, "ret %x AVERROR(EAGAIN) %x AVERROR_EOF %x AVERROR(EINVAL) %x AVERROR(ENOMEM) %x\n", 
+							ret, AVERROR(EAGAIN), AVERROR_EOF, AVERROR(EINVAL), AVERROR(ENOMEM));
 					fprintf(stderr, "Eagle: Error sending a packet for decoding\n");
 					return ret;
 				}
@@ -6333,6 +6335,21 @@ DECODE_ORG_BITS:
 	}
 
 	end_of_file = 1;
+	if (end_of_file) {
+		free(pmeminfo->pVideoBuffer); 		pmeminfo->pVideoBuffer 		  = NULL;
+		free(pmeminfo->pVideoBuffer2); 		pmeminfo->pVideoBuffer2 	  = NULL;
+		free(pmeminfo->pEncodeVideoBuffer); pmeminfo->pEncodeVideoBuffer  = NULL;
+		free(pmeminfo->pEncodeVideoBuffer2);pmeminfo->pEncodeVideoBuffer2 = NULL;
+		free(pmeminfo->pDecodeVideoBuffer);	pmeminfo->pDecodeVideoBuffer  = NULL;
+		free(pmeminfo->pDecodeVideoBuffer2);pmeminfo->pDecodeVideoBuffer2 = NULL;
+		free(pmeminfo);				pmeminfo 	= NULL;
+		free(pdecinfo);				pdecinfo	= NULL;
+		free(pencinfo);				pencinfo	= NULL;
+		free(pdec264fmtinfo);		pdec264fmtinfo	= NULL;
+		free(pfilterinfo);			pfilterinfo		= NULL;
+		free(p_input_stream_info);	p_input_stream_info = NULL;
+		return ret;
+	}
 
 NEXT:
 	for (int crf = 18; crf <= 18; crf++) {
@@ -6381,13 +6398,13 @@ NEXT:
 		saved_data_size = 0;
 	}
 
-	for (int crf = 18; crf < 19; crf++) {
+	for (int crf = 18; crf <= 18; crf++) {
 		//6. unsharp the decoded yuv data
     	ret = unsharp_decoded_yuv(pfilterinfo, pmeminfo, p_input_stream_info, fp_filter);
 
     	//7. encode the filtered frame to get the crf
     	ret = enc_filtered_yuv_to_264(pmeminfo, (float)(crf), p_input_stream_info);
-    
+
     	//8. decode the encoded 264 raw data to yuv
     	ret = decode_filtered_encoded_h264_rawdata(pmeminfo, pdecinfo);
 
@@ -6405,8 +6422,21 @@ NEXT:
 		saved_data_size_filtered = 0;
 	}
 
-	if (end_of_file)
+	if (end_of_file) {
+		free(pmeminfo->pVideoBuffer); 		pmeminfo->pVideoBuffer 		  = NULL;
+		free(pmeminfo->pVideoBuffer2); 		pmeminfo->pVideoBuffer2 	  = NULL;
+		free(pmeminfo->pEncodeVideoBuffer); pmeminfo->pEncodeVideoBuffer  = NULL;
+		free(pmeminfo->pEncodeVideoBuffer2);pmeminfo->pEncodeVideoBuffer2 = NULL;
+		free(pmeminfo->pDecodeVideoBuffer);	pmeminfo->pDecodeVideoBuffer  = NULL;
+		free(pmeminfo->pDecodeVideoBuffer2);pmeminfo->pDecodeVideoBuffer2 = NULL;
+		free(pmeminfo);				pmeminfo 	= NULL;
+		free(pdecinfo);				pdecinfo	= NULL;
+		free(pencinfo);				pencinfo	= NULL;
+		free(pdec264fmtinfo);		pdec264fmtinfo	= NULL;
+		free(pfilterinfo);			pfilterinfo		= NULL;
+		free(p_input_stream_info);	p_input_stream_info = NULL;
 		return ret;
+	}
 	else
 		goto DECODE_ORG_BITS;
 
