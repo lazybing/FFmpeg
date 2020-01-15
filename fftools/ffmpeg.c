@@ -5056,6 +5056,9 @@ static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int
 
 		byte_ptr += stride;
 	}
+
+	free(tmp_buf);
+
 	if (ref_flag)
 		reserved_ref -= width * height * 3 / 2;
 	else
@@ -5070,7 +5073,7 @@ static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int
 	ret = 0;
 
 fail_or_end:
-	free(tmp_buf);
+	//free(tmp_buf);
 	return 0;
 }
 
@@ -5480,6 +5483,10 @@ static long long get_unsharp_val(uint8_t *data, int width, int height, double am
         }
     }
 
+	for (int z = 0; z < 2 * steps_y; z++) {
+		free(sc[z]);
+	}
+
     return sharpness;
 }
 
@@ -5752,6 +5759,7 @@ static int compute_vmaf_prepare(struct newData **s, int *vmaf_width, int *vmaf_h
 {
 	int ret = 0;
 	struct newData *ps = (struct newData *)malloc(sizeof(struct newData));
+	memset(ps, 0, sizeof(struct newData));
 	ps->format   = "yuv420p";
 	*vmaf_width  = width;
 	*vmaf_height = height;
@@ -5936,6 +5944,7 @@ static int unsharp_decoded_yuv(UnsharpFilterInfo *pfilterinfo, const MemInfo *pm
 		memcpy(pmeminfo->pVideoBuffer2 + pfilterinfo->filtered_frame_num * pfilterinfo->frame_out->width * pfilterinfo->frame_out->height * 3 / 2 + pfilterinfo->frame_out->width * pfilterinfo->frame_out->height + (pfilterinfo->frame_out->width >> 1) * (pfilterinfo->frame_out->height >> 1),
 				pfilterinfo->frame_out->data[2], 
 				(pfilterinfo->frame_out->width >> 1) * (pfilterinfo->frame_out->height >> 1));
+		av_frame_unref(pfilterinfo->frame_out);
 		pfilterinfo->filtered_frame_num++;
 		if (pfilterinfo->filtered_frame_num == 10) {
 			pfilterinfo->filtered_frame_num = 0;
@@ -6325,8 +6334,8 @@ DECODE_ORG_BITS:
 					sharpness = get_unsharp_val(pdecinfo->video_dst_data[0],
 									pdecinfo->width, pdecinfo->height, 1.0, 5, 5);
 					//fwrite(decinfo.video_dst_data[0], 1, decinfo.video_dst_bufsize, inputpar.video_dst_file);
-					printf("pVideoBuffer %p pdecinfo %p pdecinfo->video_dst_data[0] %x dec_frame_num %d\n",
-							pmeminfo->pVideoBuffer, pdecinfo, pdecinfo->video_dst_data[0], pdecinfo->dec_frame_num);
+					//printf("pVideoBuffer %p pdecinfo %p pdecinfo->video_dst_data[0] %x dec_frame_num %d\n",
+					//		pmeminfo->pVideoBuffer, pdecinfo, pdecinfo->video_dst_data[0], pdecinfo->dec_frame_num);
 					if (pdecinfo->dec_frame_num < DECODE_FRAME_NUM_PER_GOP) {
 						memcpy(pmeminfo->pVideoBuffer + pdecinfo->dec_frame_num * pdecinfo->width * pdecinfo->height * 3 / 2,
 								pdecinfo->video_dst_data[0], pdecinfo->width * pdecinfo->height * 3 / 2);
@@ -6346,24 +6355,10 @@ DECODE_ORG_BITS:
 			p_input_stream_info->p_pkt->size -= ret;
 			p_input_stream_info->p_pkt->data += ret;
 		} while (p_input_stream_info->p_pkt->size > 0);
+		av_packet_unref(p_input_stream_info->p_pkt);
 	}
 
 	end_of_file = 1;
-	if (end_of_file) {
-		free(pmeminfo->pVideoBuffer); 		pmeminfo->pVideoBuffer 		  = NULL;
-		free(pmeminfo->pVideoBuffer2); 		pmeminfo->pVideoBuffer2 	  = NULL;
-		free(pmeminfo->pEncodeVideoBuffer); pmeminfo->pEncodeVideoBuffer  = NULL;
-		free(pmeminfo->pEncodeVideoBuffer2);pmeminfo->pEncodeVideoBuffer2 = NULL;
-		free(pmeminfo->pDecodeVideoBuffer);	pmeminfo->pDecodeVideoBuffer  = NULL;
-		free(pmeminfo->pDecodeVideoBuffer2);pmeminfo->pDecodeVideoBuffer2 = NULL;
-		free(pmeminfo);				pmeminfo 	= NULL;
-		free(pdecinfo);				pdecinfo	= NULL;
-		free(pencinfo);				pencinfo	= NULL;
-		free(pdec264fmtinfo);		pdec264fmtinfo	= NULL;
-		free(pfilterinfo);			pfilterinfo		= NULL;
-		free(p_input_stream_info);	p_input_stream_info = NULL;
-		return ret;
-	}
 
 NEXT:
 	for (int crf = 18; crf <= 18; crf++) {
@@ -6394,9 +6389,9 @@ NEXT:
     	compute_vmaf_prepare(&s, &vmaf_width, &vmaf_height, 
     						pdec264fmtinfo->frame->width, pdec264fmtinfo->frame->height, 
     						pmeminfo->pVideoBuffer, pmeminfo->pDecodeVideoBuffer);
-		compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
-        				1/*disable_clip*/, 1/*disable_avx*/, 0/*enable_transform*/, 0/*phone_model*/, 0/*do_psnr*/, 0/*do_ssim*/, 
-        				0/*do_ms_ssim*/, pool_method, 0/*n_thread*/, 5/*n_subsample*/, 0/*enable_conf_interval*/);
+		//compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
+        //				1/*disable_clip*/, 1/*disable_avx*/, 0/*enable_transform*/, 0/*phone_model*/, 0/*do_psnr*/, 0/*do_ssim*/, 
+        //				0/*do_ms_ssim*/, pool_method, 0/*n_thread*/, 5/*n_subsample*/, 0/*enable_conf_interval*/);
 		printf("stage 1 vmaf_score %f\n", vmaf_score);
 		free(s);
 		s = NULL;
@@ -6444,10 +6439,15 @@ NEXT:
 		free(pmeminfo->pDecodeVideoBuffer);	pmeminfo->pDecodeVideoBuffer  = NULL;
 		free(pmeminfo->pDecodeVideoBuffer2);pmeminfo->pDecodeVideoBuffer2 = NULL;
 		free(pmeminfo);				pmeminfo 	= NULL;
+		av_freep(&(pdecinfo->video_dst_data[0]));
 		free(pdecinfo);				pdecinfo	= NULL;
 		free(pencinfo);				pencinfo	= NULL;
 		free(pdec264fmtinfo);		pdec264fmtinfo	= NULL;
 		free(pfilterinfo);			pfilterinfo		= NULL;
+		av_packet_free(&(p_input_stream_info->p_pkt));  p_input_stream_info->p_pkt   = NULL;
+		av_frame_free(&(p_input_stream_info->p_frame)); p_input_stream_info->p_frame = NULL;
+		avformat_close_input(&(p_input_stream_info->p_fmt_ctx));
+		avcodec_free_context(&(p_input_stream_info->p_video_codecctx));
 		free(p_input_stream_info);	p_input_stream_info = NULL;
 		return ret;
 	}
