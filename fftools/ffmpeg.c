@@ -5683,9 +5683,9 @@ static int decode_write_frame(FILE *pOutput_File, AVCodecContext *avctx,
         //the picture is allocated by the decoder, no need to free it
         (*frame_count)++;
 
-        fwrite(frame->data[0], 1, frame->width*frame->height, pOutput_File); 
-        fwrite(frame->data[1], 1, (frame->width/2)*(frame->height/2), pOutput_File); 
-        fwrite(frame->data[2], 1, (frame->width/2)*(frame->height/2), pOutput_File); 
+        //fwrite(frame->data[0], 1, frame->width*frame->height, pOutput_File);
+        //fwrite(frame->data[1], 1, (frame->width/2)*(frame->height/2), pOutput_File);
+        //fwrite(frame->data[2], 1, (frame->width/2)*(frame->height/2), pOutput_File);
 
         if (pkt->data) {
             pkt->size -= len;
@@ -6223,8 +6223,8 @@ static int FristPartofPreProcess(char *filename)
 {
 	int end_of_file = 0;
 	const char *fmt = "yuv420p";
-	char *log_file = "./log.txt";
-	char *log_file_2 = "./log_2.txt";
+	char *log_file = "./log_test.txt";
+	char *log_file_2 = "./log_test_2.txt";
 	int vmaf_width, vmaf_height;
 	char *model_path = "/usr/local/share/model/vmaf_v0.6.1.pkl";
 	const char *pool_method = "mean";
@@ -6235,6 +6235,17 @@ static int FristPartofPreProcess(char *filename)
 	int disable_clip = 1, disable_avx = 0, enable_transform = 0, phone_model = 0;
 	int do_psnr = 0, do_ssim = 0, do_ms_ssim = 0, n_thread = 0, n_subsample = 1, enable_conf_interval = 0; 
     int video_stream_idx = -1, audio_stream_idx = -1;
+
+	//crf & bitrate & target_score
+	float stage1_prev_bitrate = 0.0, stage1_bitrate = 0.0;
+	float stage2_prev_bitrate = 0.0, stage2_bitrate = 0.0;
+	float stage1_vmaf_score = 0.0, stage1_prev_vmaf_score = 0.0;
+	float stage2_vmaf_score = 0.0, stage2_prev_vmaf_score = 0.0;
+	float stage1_per_score = 0.0, stage2_per_score = 0.0;
+	int stage1_crf = 0, stage2_crf = 0;
+	int min_score = 97, max_score = 99;
+	float target_per_score = 200;
+	static int stage1_first_flag = 1, stage2_first_flat = 1;
 
     DecodeInfo *pdecinfo = (DecodeInfo *)malloc(sizeof(DecodeInfo));
 	if (pdecinfo != NULL) {
@@ -6352,7 +6363,7 @@ DECODE_ORG_BITS:
 								  pdecinfo->pix_fmt, pdecinfo->width, pdecinfo->height);
 					sharpness = get_unsharp_val(pdecinfo->video_dst_data[0],
 									pdecinfo->width, pdecinfo->height, 1.0, 5, 5);
-					fwrite(pdecinfo->video_dst_data[0], 1, pdecinfo->video_dst_bufsize, inputpar.video_dst_file);
+					//fwrite(pdecinfo->video_dst_data[0], 1, pdecinfo->video_dst_bufsize, inputpar.video_dst_file);
 					//printf("pVideoBuffer %p pdecinfo %p pdecinfo->video_dst_data[0] %x dec_frame_num %d\n",
 					//		pmeminfo->pVideoBuffer, pdecinfo, pdecinfo->video_dst_data[0], pdecinfo->dec_frame_num);
 					if (pdecinfo->dec_frame_num < DECODE_FRAME_NUM_PER_GOP) {
@@ -6380,7 +6391,7 @@ DECODE_ORG_BITS:
 	end_of_file = 1;
 
 NEXT:
-	for (int crf = 18; crf <= 18; crf++) {
+	for (int crf = 18; crf <= 30; crf++) {
 		//3. encode the yuv data decoded in part 2 to h264 file, using crf 18..
         if ((ret = encode_prepare(p_input_stream_info, pencinfo, pdecinfo)) < 0) {
             fprintf(stderr, "Eagle: encode prepare fail\n");
@@ -6414,12 +6425,12 @@ NEXT:
 				disable_clip, disable_avx, enable_transform, phone_model, do_psnr, do_ssim, do_ms_ssim, pool_method);
 		s->stage = 1;
 		{
-			FILE *fp = fopen("pVideoBuffer.yuv", "wb");
-			FILE *fp2 = fopen("pDecodeVideoBuffer", "wb");
-			fwrite(pmeminfo->pVideoBuffer, FHD_BUFFER_SIZE, 1, fp);
-			fwrite(pmeminfo->pDecodeVideoBuffer, FHD_BUFFER_SIZE, 1, fp2);
-			fclose(fp);
-			fclose(fp2);
+			//FILE *fp = fopen("pVideoBuffer.yuv", "wb");
+			//FILE *fp2 = fopen("pDecodeVideoBuffer", "wb");
+			//fwrite(pmeminfo->pVideoBuffer, FHD_BUFFER_SIZE, 1, fp);
+			//fwrite(pmeminfo->pDecodeVideoBuffer, FHD_BUFFER_SIZE, 1, fp2);
+			//fclose(fp);
+			//fclose(fp2);
 		}
 		compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
         				disable_clip, disable_avx, enable_transform, phone_model, do_psnr, do_ssim, 
@@ -6435,9 +6446,34 @@ NEXT:
 		free(pdec264fmtinfo->inbuf);
 		pdec264fmtinfo->inbuf = NULL;
 
-		printf("compute_vmaf done vmaf_score %f saved_data_size %d\n", vmaf_score, saved_data_size);
+
+		stage1_vmaf_score = vmaf_score;
+		stage1_bitrate = (float)(saved_data_size / 1024) / (float)(DECODE_FRAME_NUM_PER_GOP / 24);
+
+		if ((fabs(stage1_vmaf_score - stage1_prev_vmaf_score) <= 1e-6)|| stage1_first_flag){
+			stage1_first_flag = 0;
+			stage1_per_score = 500;
+		} else {
+			stage1_per_score = (stage1_bitrate - stage1_prev_bitrate) / (stage1_vmaf_score - stage1_prev_vmaf_score);
+		}
+
+		if (stage1_per_score <= target_per_score){
+			stage1_prev_bitrate =
+				 stage1_bitrate =
+				 stage1_vmaf_score 		=
+				 stage1_prev_vmaf_score =
+				 stage1_per_score = 0.0;
+
+			saved_data_size = 0;
+			break;
+		}
+
+		stage1_prev_bitrate = stage1_bitrate;
+		stage1_prev_vmaf_score = stage1_vmaf_score;
+
 		saved_data_size = 0;
 	}
+	stage1_first_flag = 1;
 
 	for (int crf = 18; crf <= 18; crf++) {
 		//6. unsharp the decoded yuv data
@@ -6463,8 +6499,6 @@ NEXT:
 		s = NULL;
 		saved_data_size_filtered = 0;
 	}
-
-	exit(1);
 
 	if (end_of_file) {
 		free(pmeminfo->pVideoBuffer); 		pmeminfo->pVideoBuffer 		  = NULL;
