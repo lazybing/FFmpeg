@@ -5068,7 +5068,6 @@ static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int
 		for (j = 0; j < width; j++)
 			row_ptr[j] = tmp_buf[j] + off;
 
-		//printf("stride %d width %d\n", stride, width);
 		byte_ptr += stride;
 	}
 
@@ -5327,7 +5326,7 @@ static int encode_frame(InputStreamInfo *p_input_stream_info, EncodeInfo *p_enc_
 			if (!filtered_flag)
 			{
 				FILE *fp = fopen("./encode264.bin", "ab");
-				//fwrite(p_enc_info->p_pkt->data, 1, p_enc_info->p_pkt->size, fp);
+				fwrite(p_enc_info->p_pkt->data, 1, p_enc_info->p_pkt->size, fp);
 				fclose(fp);
 				//TODO:need to save the h264 format data into buffer to decode it
 				memcpy(pmeminfo->pEncodeVideoBuffer + saved_data_size, p_enc_info->p_pkt->data, p_enc_info->p_pkt->size);
@@ -5365,7 +5364,7 @@ static int encode_frame(InputStreamInfo *p_input_stream_info, EncodeInfo *p_enc_
 		if (!filtered_flag)
 		{
 			FILE *fp = fopen("./encode264.bin", "ab");
-			//fwrite(p_enc_info->p_pkt->data, 1, p_enc_info->p_pkt->size, fp);
+			fwrite(p_enc_info->p_pkt->data, 1, p_enc_info->p_pkt->size, fp);
 			fclose(fp);
 			//TODO:need to save the h264 format data into buffer to decode it
 			memcpy(pmeminfo->pEncodeVideoBuffer + saved_data_size, p_enc_info->p_pkt->data, p_enc_info->p_pkt->size);
@@ -5676,9 +5675,9 @@ static int decode_write_frame(FILE *pOutput_File, AVCodecContext *avctx,
         //the picture is allocated by the decoder, no need to free it
         (*frame_count)++;
 
-        //fwrite(frame->data[0], 1, frame->width*frame->height, pOutput_File);
-        //fwrite(frame->data[1], 1, (frame->width/2)*(frame->height/2), pOutput_File);
-        //fwrite(frame->data[2], 1, (frame->width/2)*(frame->height/2), pOutput_File);
+        fwrite(frame->data[0], 1, frame->width*frame->height, pOutput_File);
+        fwrite(frame->data[1], 1, (frame->width/2)*(frame->height/2), pOutput_File);
+        fwrite(frame->data[2], 1, (frame->width/2)*(frame->height/2), pOutput_File);
 
         if (pkt->data) {
             pkt->size -= len;
@@ -5686,11 +5685,12 @@ static int decode_write_frame(FILE *pOutput_File, AVCodecContext *avctx,
         }
     }
 
-    return 0;
+    return got_frame;
 }
 
 static int decode_encoded_h264_rawdata(DecEncH264FmtInfo *pinfo, MemInfo *pmeminfo, DecodeInfo *pdecinfo)
 {
+	int ret = 0;
 	int len = 0, frame_count = 0;
 
 	pinfo->inbuf = (uint8_t *)malloc(INBUF_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
@@ -5755,7 +5755,10 @@ static int decode_encoded_h264_rawdata(DecEncH264FmtInfo *pinfo, MemInfo *pmemin
 	//decode the data in the decoder itself
 	pinfo->pkt.size = 0;
 	pinfo->pkt.data = NULL;
-	decode_write_frame(pinfo->outputfp, pinfo->codecCtx, pinfo->frame, &frame_count, &pinfo->pkt, 0, pmeminfo, 0, pdecinfo);
+	do {
+		ret = decode_write_frame(pinfo->outputfp, pinfo->codecCtx, pinfo->frame, &frame_count, &pinfo->pkt, 0, pmeminfo, 0, pdecinfo);
+		printf("ret time!!!!!\n");
+	} while (ret);
 
 	return 0;
 }
@@ -6238,7 +6241,7 @@ static int FristPartofPreProcess(char *filename)
 	int stage1_crf = 0, stage2_crf = 0;
 	int min_score = 97, max_score = 99;
 	float target_per_score = 200;
-	static int stage1_first_flag = 1, stage2_first_flat = 1;
+	static int stage1_first_flag = 1, stage2_first_flag = 1;
 
     DecodeInfo *pdecinfo = (DecodeInfo *)malloc(sizeof(DecodeInfo));
 	if (pdecinfo != NULL) {
@@ -6357,17 +6360,14 @@ DECODE_ORG_BITS:
 								  pdecinfo->pix_fmt, pdecinfo->width, pdecinfo->height);
 					sharpness = get_unsharp_val(pdecinfo->video_dst_data[0],
 									pdecinfo->width, pdecinfo->height, 1.0, 5, 5);
-					//fwrite(pdecinfo->video_dst_data[0], 1, pdecinfo->video_dst_bufsize, inputpar.video_dst_file);
+
 
 					if (pdecinfo->dec_frame_num < DECODE_FRAME_NUM_PER_GOP) {
 						memcpy(pmeminfo->pVideoBuffer + pdecinfo->dec_frame_num * pdecinfo->width * pdecinfo->height * 3 / 2,
 								pdecinfo->video_dst_data[0], pdecinfo->width * pdecinfo->height * 3 / 2);
-					} else if (pdecinfo->dec_frame_num >= MIN_NUM_OF_PER_GOP) {
-						//p_input_stream_info->p_pkt->size = 0;
-						//p_input_stream_info->p_pkt->data += p_input_stream_info->p_pkt->size;
-						//pdecinfo->dec_frame_num = 0;
-						//goto NEXT;
+						fwrite(pdecinfo->video_dst_data[0], 1, pdecinfo->video_dst_bufsize, inputpar.video_dst_file);
 					}
+
 					pdecinfo->dec_frame_num++;
 					break;
 				}
@@ -6409,13 +6409,15 @@ NEXT:
 
     	//5. compare the yuv decoded from 4 and 2, to get the target score
     	compute_vmaf_prepare(&s, &vmaf_width, &vmaf_height, 
-    						pdec264fmtinfo->frame->width, pdec264fmtinfo->frame->height, 
+    						p_input_stream_info->p_frame->width, p_input_stream_info->p_frame->height, 
     						pmeminfo->pVideoBuffer, pmeminfo->pDecodeVideoBuffer);
 		s->stage = 1;
+		printf("vmaf_width %d vmaf_height %d\n", vmaf_width, vmaf_height);
 		compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
         				disable_clip, disable_avx, enable_transform, phone_model, do_psnr, do_ssim, 
         				do_ms_ssim, pool_method, n_thread, n_subsample, enable_conf_interval);
 		printf("stage 1 vmaf_score %f\n", vmaf_score);
+		exit(1);
 		free(s);
 		s = NULL;
 
@@ -6425,7 +6427,6 @@ NEXT:
 		avcodec_free_context(&(pdec264fmtinfo->codecCtx));
 		free(pdec264fmtinfo->inbuf);
 		pdec264fmtinfo->inbuf = NULL;
-
 
 		stage1_vmaf_score = vmaf_score;
 		stage1_bitrate = (float)(saved_data_size / 1024) / (float)(DECODE_FRAME_NUM_PER_GOP / 24);
