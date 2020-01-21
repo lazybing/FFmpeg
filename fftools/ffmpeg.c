@@ -5025,6 +5025,13 @@ typedef struct UnsharpFilterInfo
 	int filtered_frame_num;
 }UnsharpFilterInfo;
 
+typedef struct EncodeParams {
+	int target_vmaf_score[1000];
+	int crf_per_gop[1000];
+	int unsharp_per_gop[1000];
+	int aq_strength_per_gop[1000];
+}EncodeParams;
+
 static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int height, int stride, int ref_flag, int stage)
 {
 	char *byte_ptr = (char *)buf;
@@ -5032,8 +5039,14 @@ static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int
 	int i, j;
 	int ret = 1;
 	static int first_flag   = 1;
+	static int end_of_frame = 0;
 	static int reserved_ref = 0;
 	static int reserved_dis = 0;
+
+	if (end_of_frame == 1) {
+		end_of_frame = 0;
+		return 2;
+	}
 	if (first_flag) {
 		first_flag = 0;
 		if (stage == 1) {
@@ -5081,7 +5094,8 @@ static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int
 	if (reserved_ref == 0 || reserved_dis == 0)
 	{
 		first_flag = 1;
-		return 2;
+		end_of_frame = 1;
+		return 0;
 	}
 
 	ret = 0;
@@ -5133,28 +5147,28 @@ static int read_frame_new(float *ref_data, float *dis_data, float *temp_data, in
 	char *fmt = user_data->format;
 	int w = user_data->width;
 	int h = user_data->height;
-	int ret;
+	int ret_ref,ret_dis;
 	uint8_t *frame_data = (uint8_t *)dis_data;
 
 	//read ref y
 	if (!strcmp(fmt, "yuv420p")) {
-		ret = read_image_new_b(user_data->ref, ref_data, 0, w, h, stride_byte, 1, user_data->stage);
+		ret_ref = read_image_new_b(user_data->ref, ref_data, 0, w, h, stride_byte, 1, user_data->stage);
 	} else {
 		fprintf(stderr, "Eagle: unknown format %s.\n", fmt);
 		return 1;		
 	}
-	if (ret == 2)
-		return ret;
 
 	//read dis y
 	if (!strcmp(fmt, "yuv420p")) {
-		ret = read_image_new_b(user_data->dis, dis_data, 0, w, h, stride_byte, 0, user_data->stage);
+		ret_dis = read_image_new_b(user_data->dis, dis_data, 0, w, h, stride_byte, 0, user_data->stage);
 	} else {
 		fprintf(stderr, "Eagle: unknown format %s.\n", fmt);
 		return 1;
 	}
-	if (ret == 2)
-		return ret;
+	if (ret_ref == 2 || ret_dis == 2)
+		return 2;
+
+	//fprintf(stderr, "Frame: %d/%d\r", completed_frames++, user_data->num_frames);
 
 	return 0;
 }
@@ -5688,6 +5702,114 @@ static int decode_write_frame(FILE *pOutput_File, AVCodecContext *avctx,
     return got_frame;
 }
 
+static int decode_write_frame_new(FILE *pOutput_File, AVCodecContext *avctx,
+                              AVFrame *frame, int *frame_count, AVPacket *pkt, int last,
+                              MemInfo *pmeminfo, int filtered_flag, DecodeInfo *pdecinfo)
+{
+
+#if 1
+	char buf[1024];
+	int ret;
+
+	ret = avcodec_send_packet(avctx, pkt);
+	if (ret < 0) {
+		fprintf(stderr, "Eagle: Error sending a packet for decoding in decode_write_frame_new\n");
+		exit(1);
+	}
+
+	while (ret >= 0) {
+		ret = avcodec_receive_frame(avctx, frame);
+		if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+			return;
+		else if (ret < 0) {
+			fprintf(stderr, "Error during decoding\n");
+			exit(1);
+		}
+
+		fflush(stdout);
+
+		if (!filtered_flag) {
+
+			av_image_copy(pdecinfo->video_dst_data, pdecinfo->video_dst_linesize,
+						  (const uint8_t *)(frame->data), frame->linesize,
+						  AV_PIX_FMT_YUV420P, frame->width, frame->height);
+
+		    //memcpy(pmeminfo->pDecodeVideoBuffer + (*frame_count) * frame->width * frame->height * 3 / 2,
+			//    frame->data[0],	frame->width * frame->height * 3 / 2);
+			memcpy(pmeminfo->pDecodeVideoBuffer + (*frame_count) * frame->width * frame->height * 3 / 2,
+			    pdecinfo->video_dst_data[0],	frame->width * frame->height * 3 / 2);
+		} else {
+			av_image_copy(pdecinfo->video_dst_data, pdecinfo->video_dst_linesize,
+						  (const uint8_t *)(frame->data), frame->linesize,
+						  AV_PIX_FMT_YUV420P, frame->width, frame->height);
+			memcpy(pmeminfo->pDecodeVideoBuffer2 + (*frame_count) * frame->width * frame->height * 3 / 2,
+			    pdecinfo->video_dst_data[0],	frame->width * frame->height * 3 / 2);
+		}
+
+        //the picture is allocated by the decoder, no need to free it
+        (*frame_count)++;
+
+        fwrite(frame->data[0], 1, frame->width*frame->height, pOutput_File);
+        fwrite(frame->data[1], 1, (frame->width/2)*(frame->height/2), pOutput_File);
+        fwrite(frame->data[2], 1, (frame->width/2)*(frame->height/2), pOutput_File);
+
+        //if (pkt->data) {
+        //    pkt->size -= len;
+        //    pkt->data += len;
+        //}
+	}
+#else
+    int i;
+    int idx;
+    int color_idx;
+    int len, got_frame;
+
+    len = avcodec_decode_video2(avctx, frame, &got_frame, pkt);
+    if (len < 0) {
+        fprintf(stderr, "Error while decoding frame %d\n", *frame_count);
+        return len;
+    }
+
+    if (got_frame) {
+
+        fflush(stdout);
+
+		if (!filtered_flag) {
+
+			av_image_copy(pdecinfo->video_dst_data, pdecinfo->video_dst_linesize,
+						  (const uint8_t *)(frame->data), frame->linesize,
+						  AV_PIX_FMT_YUV420P, frame->width, frame->height);
+
+		    //memcpy(pmeminfo->pDecodeVideoBuffer + (*frame_count) * frame->width * frame->height * 3 / 2,
+			//    frame->data[0],	frame->width * frame->height * 3 / 2);
+			memcpy(pmeminfo->pDecodeVideoBuffer + (*frame_count) * frame->width * frame->height * 3 / 2,
+			    pdecinfo->video_dst_data[0],	frame->width * frame->height * 3 / 2);
+		} else {
+			av_image_copy(pdecinfo->video_dst_data, pdecinfo->video_dst_linesize,
+						  (const uint8_t *)(frame->data), frame->linesize,
+						  AV_PIX_FMT_YUV420P, frame->width, frame->height);
+			memcpy(pmeminfo->pDecodeVideoBuffer2 + (*frame_count) * frame->width * frame->height * 3 / 2,
+			    pdecinfo->video_dst_data[0],	frame->width * frame->height * 3 / 2);
+		}
+
+        //the picture is allocated by the decoder, no need to free it
+        (*frame_count)++;
+
+        fwrite(frame->data[0], 1, frame->width*frame->height, pOutput_File);
+        fwrite(frame->data[1], 1, (frame->width/2)*(frame->height/2), pOutput_File);
+        fwrite(frame->data[2], 1, (frame->width/2)*(frame->height/2), pOutput_File);
+
+        if (pkt->data) {
+            pkt->size -= len;
+            pkt->data += len;
+        }
+    }
+
+    return got_frame;
+#endif
+}
+
+
 static int decode_encoded_h264_rawdata(DecEncH264FmtInfo *pinfo, MemInfo *pmeminfo, DecodeInfo *pdecinfo)
 {
 	int ret = 0;
@@ -5747,18 +5869,21 @@ static int decode_encoded_h264_rawdata(DecEncH264FmtInfo *pinfo, MemInfo *pmemin
 			continue;
 		}
 			
-		if(decode_write_frame(pinfo->outputfp, pinfo->codecCtx, pinfo->frame, &frame_count, &(pinfo->pkt), 0, pmeminfo, 0, pdecinfo) < 0){
-			exit(1);
-		}
+		//if(decode_write_frame(pinfo->outputfp, pinfo->codecCtx, pinfo->frame, &frame_count, &(pinfo->pkt), 0, pmeminfo, 0, pdecinfo) < 0){
+		//	exit(1);
+		//}
+		if (pinfo->pkt.size)
+			decode_write_frame_new(pinfo->outputfp, pinfo->codecCtx, pinfo->frame, &frame_count, &(pinfo->pkt), 0, pmeminfo, 0, pdecinfo) ;
 	} 
 
 	//decode the data in the decoder itself
 	pinfo->pkt.size = 0;
 	pinfo->pkt.data = NULL;
-	do {
-		ret = decode_write_frame(pinfo->outputfp, pinfo->codecCtx, pinfo->frame, &frame_count, &pinfo->pkt, 0, pmeminfo, 0, pdecinfo);
-		printf("ret time!!!!!\n");
-	} while (ret);
+	//do {
+	//	ret = decode_write_frame(pinfo->outputfp, pinfo->codecCtx, pinfo->frame, &frame_count, &pinfo->pkt, 0, pmeminfo, 0, pdecinfo);
+	//	printf("ret time!!!!!\n");
+	//} while (ret);
+	decode_write_frame_new(pinfo->outputfp, pinfo->codecCtx, pinfo->frame, &frame_count, &pinfo->pkt, 0, pmeminfo, 0, pdecinfo);
 
 	return 0;
 }
@@ -5786,7 +5911,7 @@ static int compute_vmaf_prepare(struct newData **s, int *vmaf_width, int *vmaf_h
 	}
 	ps->ref = ref;
 	ps->dis = dis;
-	ps->num_frames = -1;
+	ps->num_frames = 50;
 	*s = ps;
 
 	return 0;	
@@ -6229,7 +6354,7 @@ static int FristPartofPreProcess(char *filename)
 	double vmaf_score = 0.0;
 	struct newData *s = NULL;
 	int disable_clip = 0, disable_avx = 0, enable_transform = 0, phone_model = 0;
-	int do_psnr = 0, do_ssim = 0, do_ms_ssim = 0, n_thread = 0, n_subsample = 1, enable_conf_interval = 0; 
+	int do_psnr = 0, do_ssim = 0, do_ms_ssim = 0, n_thread = 1, n_subsample = 1, enable_conf_interval = 0; 
     int video_stream_idx = -1, audio_stream_idx = -1;
 
 	//crf & bitrate & target_score
@@ -6240,7 +6365,7 @@ static int FristPartofPreProcess(char *filename)
 	float stage1_per_score = 0.0, stage2_per_score = 0.0;
 	int stage1_crf = 0, stage2_crf = 0;
 	int min_score = 97, max_score = 99;
-	float target_per_score = 200;
+	float target_per_score = 400;
 	static int stage1_first_flag = 1, stage2_first_flag = 1;
 
     DecodeInfo *pdecinfo = (DecodeInfo *)malloc(sizeof(DecodeInfo));
@@ -6417,7 +6542,7 @@ NEXT:
         				disable_clip, disable_avx, enable_transform, phone_model, do_psnr, do_ssim, 
         				do_ms_ssim, pool_method, n_thread, n_subsample, enable_conf_interval);
 		printf("stage 1 vmaf_score %f\n", vmaf_score);
-		exit(1);
+		//exit(1);
 		free(s);
 		s = NULL;
 
@@ -6429,7 +6554,7 @@ NEXT:
 		pdec264fmtinfo->inbuf = NULL;
 
 		stage1_vmaf_score = vmaf_score;
-		stage1_bitrate = (float)(saved_data_size / 1024) / (float)(DECODE_FRAME_NUM_PER_GOP / 24);
+		stage1_bitrate = (float)(saved_data_size / 1024) / (float)((DECODE_FRAME_NUM_PER_GOP) / 25);
 
 		if ((fabs(stage1_vmaf_score - stage1_prev_vmaf_score) <= 1e-6)|| stage1_first_flag){
 			stage1_first_flag = 0;
@@ -6439,13 +6564,13 @@ NEXT:
 		}
 
 		if (stage1_per_score <= target_per_score){
-			printf("stage1_vmaf_score final result %f\n", stage1_vmaf_score);
+			printf("stage1_vmaf_score final result %f crf %d stage1_per_score %f\n", stage1_vmaf_score, crf, stage1_per_score);
 			stage1_prev_bitrate =
 				 stage1_bitrate =
 				 stage1_vmaf_score 		=
 				 stage1_prev_vmaf_score =
 				 stage1_per_score = 0.0;
-
+			//exit(1);
 			saved_data_size = 0;
 			break;
 		}
@@ -6456,6 +6581,7 @@ NEXT:
 		saved_data_size = 0;
 	}
 	stage1_first_flag = 1;
+	exit(1);
 
 	for (int crf = 18; crf <= 18; crf++) {
 		//6. unsharp the decoded yuv data
@@ -6519,8 +6645,6 @@ int main(int argc, char **argv)
     //TODO:The first process is to get the target_vmaf and sharpness value for each segment
     FristPartofPreProcess(argv[1]);
 
-    //TODO:The second process is to get the dynamic crf
-    //SecondPartofPreProcess();
     return 0;
 
     init_dynload();
