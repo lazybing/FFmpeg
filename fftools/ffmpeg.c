@@ -1062,6 +1062,22 @@ static void do_subtitle_out(OutputFile *of,
 }
 #include <x264.h>
 
+int gop_num = 0;
+
+#define TOTAL_GOP_NUM 1000
+
+float global_target_score_array[TOTAL_GOP_NUM];
+float global_crf_array[TOTAL_GOP_NUM];
+float global_unsharp_array[TOTAL_GOP_NUM];
+float global_aq_strength_array[TOTAL_GOP_NUM];
+int   global_frames_of_gop_array[TOTAL_GOP_NUM];
+int   global_decode_gop_num;
+int   global_stage1_gop_num;
+int   global_stage2_gop_num;
+int   global_gop;
+int   total_gop_num;
+
+
 typedef struct X264Context {
     AVClass        *class;
     x264_param_t    params;
@@ -1365,7 +1381,23 @@ static void do_video_out(OutputFile *of,
         //x4->params.rc_f_rf_constant = x4->crf = crx_value;
         //x4->params.rc_f_aq_strength = x4->aq_strength = aq_strength_value;
         {
-	        printf("ost->frames_encoded %d\n", ost->frames_encoded);
+        	long long total_encoded_frame_num = 0;
+			X264Context *x4 = enc->priv_data;
+
+			global_frames_of_gop_array[global_gop];
+			for (int i = 0; i <= global_gop; i++) {
+				total_encoded_frame_num += global_frames_of_gop_array[i];
+			}
+			if (ost->frames_encoded > total_encoded_frame_num && global_gop < total_gop_num)
+				global_gop++;
+
+			x4->params.rc.f_rf_constant = x4->crf         = global_crf_array[global_gop];
+			x4->params.rc.f_aq_strength = x4->aq_strength = global_aq_strength_array[global_gop];
+			x264_encoder_reconfig(x4->enc, &x4->params);
+	        printf("ost->frames_encoded %d crf %f aq_strength %f\n", 
+				ost->frames_encoded, global_crf_array[global_gop], global_aq_strength_array[global_gop]);
+			
+			#if 0
 	        if (ost->frames_encoded <= 319) {
 		        X264Context *x4 = enc->priv_data;
 				x4->params.rc.f_rf_constant = x4->crf = 30;
@@ -1377,6 +1409,7 @@ static void do_video_out(OutputFile *of,
 				x4->params.rc.f_aq_strength = x4->aq_strength = 1.3;
 				x264_encoder_reconfig(x4->enc, &x4->params);
 			}
+			#endif
         }
 
         ret = avcodec_send_frame(enc, in_picture);
@@ -4946,20 +4979,6 @@ int enc_pkt_size[DECODE_FRAME_NUM_PER_GOP];
 static long long saved_data_size_filtered = 0;
 int enc_pkt_size_filtered[DECODE_FRAME_NUM_PER_GOP];
 
-int gop_num = 0;
-
-#define TOTAL_GOP_NUM 1000
-
-float global_target_score_array[TOTAL_GOP_NUM];
-float global_crf_array[TOTAL_GOP_NUM];
-float global_unsharp_array[TOTAL_GOP_NUM];
-float global_aq_strength_array[TOTAL_GOP_NUM];
-int   global_frames_of_gop_array[TOTAL_GOP_NUM];
-int   global_decode_gop_num;
-int   global_stage1_gop_num;
-int   global_stage2_gop_num;
-
-
 typedef struct MemInfo {
 	uint8_t *pVideoBuffer;
 	uint8_t *pVideoBufferCrf5;
@@ -5904,8 +5923,8 @@ static int decode_write_frame_new(FILE *pOutput_File, AVCodecContext *avctx,
 
 		    //memcpy(pmeminfo->pDecodeVideoBuffer + (*frame_count) * frame->width * frame->height * 3 / 2,
 			//    frame->data[0],	frame->width * frame->height * 3 / 2);
-			if (pkt == NULL)
-				printf("frame_count %d\n", (*frame_count));
+			//if (pkt == NULL)
+			//	printf("frame_count %d\n", (*frame_count));
 			memcpy(pmeminfo->pDecodeVideoBuffer + (*frame_count) * frame->width * frame->height * 3 / 2,
 			    pdecinfo->video_dst_data[0],	frame->width * frame->height * 3 / 2);
 		} else {
@@ -5975,7 +5994,7 @@ static int decode_encoded_h264_rawdata(DecEncH264FmtInfo *pinfo, MemInfo *pmemin
 	memcpy(pinfo->inbuf, pmeminfo->pEncodeVideoBuffer, saved_data_size);
 	pinfo->pDataPtr  = pinfo->inbuf;
 	pinfo->uDataSize = saved_data_size;
-	printf("saved_data_size %d\n", saved_data_size);
+	//printf("saved_data_size %d\n", saved_data_size);
 	while (pinfo->uDataSize > 0) {
 		len = av_parser_parse2(pinfo->pCodecParserCtx, pinfo->codecCtx, &(pinfo->pkt.data), &(pinfo->pkt.size),
 							pinfo->pDataPtr, pinfo->uDataSize,
@@ -6551,6 +6570,37 @@ static int decode_filtered_encoded_h264_rawdata(MemInfo *pmeminfo, DecodeInfo *p
 	return 0;
 }
 
+static float get_unsharp(float pixel_unsharpness)
+{
+	float unsharp_factor;
+	if (pixel_unsharpness <= 0.1)
+		pixel_unsharpness = 0.1;
+	else if (pixel_unsharpness >= 0.8)
+		pixel_unsharpness = 0.8;
+
+	unsharp_factor = (((0.8 - pixel_unsharpness) / 0.7) * ((0.8 - pixel_unsharpness) / 0.7)) * 6;
+
+	if (unsharp_factor <= 1.0)
+		unsharp_factor = 1.0;
+
+	return unsharp_factor * pixel_unsharpness;
+}
+
+static float get_aq_strength(float pixel_unsharpness)
+{
+	float aq_float = 0.0;
+	if (pixel_unsharpness <= 0.1)
+		pixel_unsharpness = 0.1;
+	else if (pixel_unsharpness >= 0.8)
+		pixel_unsharpness = 0.8;
+
+	aq_float = (float)(0.5 + (0.8 - pixel_unsharpness) / 0.7);
+	if (aq_float < 1.0)
+		aq_float = 1.0;
+
+	return aq_float;
+}
+
 //decode the mp4 format h264 codec to yuv,
 static int FristPartofPreProcess(char *filename)
 {
@@ -6699,14 +6749,17 @@ static int FristPartofPreProcess(char *filename)
 					if (p_input_stream_info->p_frame->pict_type == AV_PICTURE_TYPE_I &&
 						pdecinfo->dec_frame_num >= MIN_NUM_OF_PER_GOP) {
 						pixel_sharpness_val = (float)((float)total_sharpness / pdecinfo->dec_frame_num)/(float)(p_input_stream_info->p_frame->width)/(float)(p_input_stream_info->p_frame->height);
-						printf("total_sharpness %ld avg_unsharp %d pixel_sharpness_val %f dec_frame_num %d\n", 
-							total_sharpness, total_sharpness / pdecinfo->dec_frame_num,  pixel_sharpness_val, pdecinfo->dec_frame_num);
 						global_frames_of_gop_array[global_decode_gop_num] = pdecinfo->dec_frame_num;
-						global_unsharp_array[global_decode_gop_num++] = pixel_sharpness_val;
+						global_aq_strength_array[global_decode_gop_num] = get_aq_strength(pixel_sharpness_val);
+						global_unsharp_array[global_decode_gop_num++] = get_unsharp(pixel_sharpness_val);
+						printf("dec_frame_num %d total_sharpness %ld avg_unsharp %d pixel_sharpness_val %f unsharp_value %f\n", 
+							pdecinfo->dec_frame_num, total_sharpness, total_sharpness / pdecinfo->dec_frame_num,  
+							pixel_sharpness_val, global_unsharp_array[global_decode_gop_num - 1]);
 						total_sharpness         = 0;
 						pdecinfo->dec_frame_num = 0;
 						p_input_stream_info->p_pkt->data += p_input_stream_info->p_pkt->size;
 						p_input_stream_info->p_pkt->size = 0;
+						total_gop_num++;
 						goto NEXT;
 					}
 
@@ -6740,8 +6793,6 @@ DECODE_ORG_BITS:
 	}
 
 	end_of_file = 1;
-
-	printf("width %d height %d line %d\n", p_input_stream_info->width, p_input_stream_info->height, __LINE__);
 
 	if (1)
 	{
@@ -6783,13 +6834,15 @@ DECODE_ORG_BITS:
 		printf("width %d height %d line %d\n", p_input_stream_info->width, p_input_stream_info->height, __LINE__);
 		#endif
 		pixel_sharpness_val = (float)((float)total_sharpness / pdecinfo->dec_frame_num)/(float)(p_input_stream_info->p_frame->width)/(float)(p_input_stream_info->p_frame->height);
-		printf("total_sharpness %ld pixel_sharpness_val %f dec_frame_num %d\n", 
-			total_sharpness, pixel_sharpness_val, pdecinfo->dec_frame_num);
+		//printf("total_sharpness %ld pixel_sharpness_val %f dec_frame_num %d\n", 
+		//	total_sharpness, pixel_sharpness_val, pdecinfo->dec_frame_num);
 		global_frames_of_gop_array[global_decode_gop_num] = pdecinfo->dec_frame_num;
-		global_unsharp_array[global_decode_gop_num++] = pixel_sharpness_val;
+		global_aq_strength_array[global_decode_gop_num]   = get_aq_strength(pixel_sharpness_val);
+		global_unsharp_array[global_decode_gop_num++]     = get_unsharp(pixel_sharpness_val);
 		pdecinfo->dec_frame_num = 0;
 		p_input_stream_info->p_pkt->data += p_input_stream_info->p_pkt->size;
 		p_input_stream_info->p_pkt->size = 0;
+		//total_gop_num++;
 
 		//memcpy(p_input_stream_info, p_temp_input_stream_info, sizeof(InputStreamInfo));		
 		}
@@ -6856,7 +6909,7 @@ NEXT:
 		compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
         				disable_clip, disable_avx, enable_transform, phone_model, do_psnr, do_ssim, 
         				do_ms_ssim, pool_method, n_thread, n_subsample, enable_conf_interval);
-		printf("stage 1 vmaf_score %f\n", vmaf_score);
+		//printf("stage 1 vmaf_score %f\n", vmaf_score);
 		//exit(1);
 		free(s);
 		s = NULL;
@@ -6878,8 +6931,8 @@ NEXT:
 			stage1_per_score = (stage1_bitrate - stage1_prev_bitrate) / (stage1_vmaf_score - stage1_prev_vmaf_score);
 		}
 
-		printf("bitrate %f prev_bitrate %f vmaf_score %f prev_vmaf_score %f crf %d per_score %f saved_data_size %d saved_size %d\n",
-				stage1_bitrate, stage1_prev_bitrate, stage1_vmaf_score, stage1_prev_vmaf_score, crf, stage1_per_score, saved_data_size, saved_size);
+		//printf("bitrate %f prev_bitrate %f vmaf_score %f prev_vmaf_score %f crf %d per_score %f saved_data_size %d saved_size %d\n",
+		//		stage1_bitrate, stage1_prev_bitrate, stage1_vmaf_score, stage1_prev_vmaf_score, crf, stage1_per_score, saved_data_size, saved_size);
 
 		if (stage1_per_score <= target_per_score){
 			printf("stage1_vmaf_score final result %f crf %d stage1_per_score %f\n", 
@@ -6934,7 +6987,7 @@ NEXT:
 		compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file_2, NULL,
         				disable_clip, disable_avx, enable_transform, phone_model, do_psnr, do_ssim, 
         				do_ms_ssim, pool_method, n_thread, n_subsample, enable_conf_interval);
-		printf("stage 2 vmaf_score %f\n", vmaf_score);
+		//printf("stage 2 vmaf_score %f\n", vmaf_score);
 
 		if (vmaf_score < global_target_score_array[global_stage2_gop_num]) {
 			printf("crf %d vmaf_score %f\n", crf, vmaf_score);
@@ -6962,7 +7015,8 @@ NEXT:
 		av_freep(&(pdecinfo->video_dst_data[0]));
 		free(pdecinfo);				pdecinfo	= NULL;
 		free(pencinfo);				pencinfo	= NULL;
-		fclose(pdec264fmtinfo->outputfp);
+		if (pdec264fmtinfo->outputfp)
+			fclose(pdec264fmtinfo->outputfp);
 		free(pdec264fmtinfo);		pdec264fmtinfo	= NULL;
 		free(pfilterinfo);			pfilterinfo		= NULL;
 		av_packet_free(&(p_input_stream_info->p_pkt));  p_input_stream_info->p_pkt   = NULL;
@@ -6970,8 +7024,10 @@ NEXT:
 		avformat_close_input(&(p_input_stream_info->p_fmt_ctx));
 		avcodec_free_context(&(p_input_stream_info->p_video_codecctx));
 		free(p_input_stream_info);	p_input_stream_info = NULL;
-		fclose(inputpar.video_dst_file);
-		fclose(fp_filter);
+		if (inputpar.video_dst_file)
+			fclose(inputpar.video_dst_file);
+		if (fp_filter)
+			fclose(fp_filter);
 		return ret;
 	}
 	else
