@@ -274,6 +274,9 @@ static av_cold void uninit(AVFilterContext *ctx)
     free_filter_param(&s->chroma, s->nb_threads);
 }
 
+#define TOTAL_GOP_NUM 1000
+extern float global_unsharp_array[TOTAL_GOP_NUM];
+extern int   global_frames_of_gop_array[TOTAL_GOP_NUM];
 static int filter_frame(AVFilterLink *link, AVFrame *in)
 {
     UnsharpContext *s = link->dst->priv;
@@ -284,6 +287,9 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
     //TODO:eagle should add
     //add the unsharp_value
     //example:s->lamount = unsharp_value;
+    //static int frame_num = 0;
+	//printf("filter_frame frame_num %d\n", frame_num++);
+	s->lamount = 0.9;
 
     out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
     if (!out) {
