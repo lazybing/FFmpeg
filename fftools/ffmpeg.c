@@ -77,6 +77,7 @@
 #include <libavfilter/buffersrc.h>
 #include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
+#include <sys/time.h>
 
 #if HAVE_SYS_RESOURCE_H
 #include <sys/time.h>
@@ -1059,6 +1060,70 @@ static void do_subtitle_out(OutputFile *of,
         output_packet(of, &pkt, ost, 0);
     }
 }
+#include <x264.h>
+
+typedef struct X264Context {
+    AVClass        *class;
+    x264_param_t    params;
+    x264_t         *enc;
+    x264_picture_t  pic;
+    uint8_t        *sei;
+    int             sei_size;
+    char *preset;
+    char *tune;
+    char *profile;
+    char *level;
+    int fastfirstpass;
+    char *wpredp;
+    char *x264opts;
+    float crf;
+    float crf_max;
+    int cqp;
+    int aq_mode;
+    float aq_strength;
+    char *psy_rd;
+    int psy;
+    int rc_lookahead;
+    int weightp;
+    int weightb;
+    int ssim;
+    int intra_refresh;
+    int bluray_compat;
+    int b_bias;
+    int b_pyramid;
+    int mixed_refs;
+    int dct8x8;
+    int fast_pskip;
+    int aud;
+    int mbtree;
+    char *deblock;
+    float cplxblur;
+    char *partitions;
+    int direct_pred;
+    int slice_max_size;
+    char *stats;
+    int nal_hrd;
+    int avcintra_class;
+    int motion_est;
+    int forced_idr;
+    int coder;
+    int a53_cc;
+    int b_frame_strategy;
+    int chroma_offset;
+    int scenechange_threshold;
+    int noise_reduction;
+
+    char *x264_params;
+
+    int nb_reordered_opaque, next_reordered_opaque;
+    int64_t *reordered_opaque;
+
+    /**
+     * If the encoder does not support ROI then warn the first time we
+     * encounter a frame with ROI side data.
+     */
+    int roi_warned;
+} X264Context;
 
 static void do_video_out(OutputFile *of,
                          OutputStream *ost,
@@ -1299,6 +1364,20 @@ static void do_video_out(OutputFile *of,
         //example: X264Context *x4 = enc->priv_data;
         //x4->params.rc_f_rf_constant = x4->crf = crx_value;
         //x4->params.rc_f_aq_strength = x4->aq_strength = aq_strength_value;
+        {
+	        printf("ost->frames_encoded %d\n", ost->frames_encoded);
+	        if (ost->frames_encoded <= 319) {
+		        X264Context *x4 = enc->priv_data;
+				x4->params.rc.f_rf_constant = x4->crf = 30;
+				x4->params.rc.f_aq_strength = x4->aq_strength = 1.2;
+				x264_encoder_reconfig(x4->enc, &x4->params);
+	        } else {
+		        X264Context *x4 = enc->priv_data;
+				x4->params.rc.f_rf_constant = x4->crf = 33;
+				x4->params.rc.f_aq_strength = x4->aq_strength = 1.3;
+				x264_encoder_reconfig(x4->enc, &x4->params);
+			}
+        }
 
         ret = avcodec_send_frame(enc, in_picture);
         if (ret < 0)
@@ -2191,6 +2270,8 @@ static int ifilter_send_frame(InputFilter *ifilter, AVFrame *frame)
             av_log(NULL, AV_LOG_ERROR, "Error while filtering: %s\n", av_err2str(ret));
             return ret;
         }
+
+		//printf("name %s\n", fg->graph->filters[i]->name);
 
         ret = configure_filtergraph(fg);
         if (ret < 0) {
@@ -4846,7 +4927,7 @@ static void log_callback_null(void *ptr, int level, const char *fmt, va_list vl)
 {
 }
 
-#include <x264.h>
+//#include <x264.h>
 #include <malloc.h>
 #define MAX_MATRIX_SIZE 63
 #define FHD_BUFFER_SIZE 0x956A000 //1920*1088*50*3/2
@@ -4867,6 +4948,18 @@ int enc_pkt_size_filtered[DECODE_FRAME_NUM_PER_GOP];
 
 int gop_num = 0;
 
+#define TOTAL_GOP_NUM 1000
+
+float global_target_score_array[TOTAL_GOP_NUM];
+float global_crf_array[TOTAL_GOP_NUM];
+float global_unsharp_array[TOTAL_GOP_NUM];
+float global_aq_strength_array[TOTAL_GOP_NUM];
+int   global_frames_of_gop_array[TOTAL_GOP_NUM];
+int   global_decode_gop_num;
+int   global_stage1_gop_num;
+int   global_stage2_gop_num;
+
+
 typedef struct MemInfo {
 	uint8_t *pVideoBuffer;
 	uint8_t *pVideoBufferCrf5;
@@ -4879,7 +4972,7 @@ typedef struct MemInfo {
 	uint8_t *pEncodeVideoBuffer2;
 	uint8_t *pDecodeVideoBuffer2;
 }MemInfo;
-
+#if 0
 typedef struct X264Context {
     AVClass        *class;
     x264_param_t    params;
@@ -4942,7 +5035,7 @@ typedef struct X264Context {
      */
     int roi_warned;
 } X264Context;
-
+#endif
 typedef struct InputParams {
     char *src_filename;
     char *video_dst_filename;
@@ -6484,7 +6577,7 @@ static int FristPartofPreProcess(char *filename)
 	float stage1_per_score = 0.0, stage2_per_score = 0.0;
 	int stage1_crf = 0, stage2_crf = 0;
 	int min_score = 97, max_score = 99;
-	float target_per_score = 500;
+	float target_per_score = 400;
 	static int stage1_first_flag = 1, stage2_first_flag = 1;
 
     DecodeInfo *pdecinfo = (DecodeInfo *)malloc(sizeof(DecodeInfo));
@@ -6554,6 +6647,7 @@ static int FristPartofPreProcess(char *filename)
 	memset(pmeminfo->pDecodeVideoBuffer2, 	0, FHD_BUFFER_SIZE / 5);
 
     InputStreamInfo *p_input_stream_info = (InputStreamInfo *)malloc(sizeof(InputStreamInfo));
+	InputStreamInfo *p_temp_input_stream_info = (InputStreamInfo *)malloc(sizeof(InputStreamInfo));
     if (!p_input_stream_info) {
         fprintf(stderr, "Eagle:allocate input stream info fail\n");
         return -1;
@@ -6605,10 +6699,14 @@ static int FristPartofPreProcess(char *filename)
 					if (p_input_stream_info->p_frame->pict_type == AV_PICTURE_TYPE_I &&
 						pdecinfo->dec_frame_num >= MIN_NUM_OF_PER_GOP) {
 						pixel_sharpness_val = (float)((float)total_sharpness / pdecinfo->dec_frame_num)/(float)(p_input_stream_info->p_frame->width)/(float)(p_input_stream_info->p_frame->height);
-						printf("total_sharpness %ld pixel_sharpness_val %f\n", total_sharpness, pixel_sharpness_val);
+						printf("total_sharpness %ld avg_unsharp %d pixel_sharpness_val %f dec_frame_num %d\n", 
+							total_sharpness, total_sharpness / pdecinfo->dec_frame_num,  pixel_sharpness_val, pdecinfo->dec_frame_num);
+						global_frames_of_gop_array[global_decode_gop_num] = pdecinfo->dec_frame_num;
+						global_unsharp_array[global_decode_gop_num++] = pixel_sharpness_val;
+						total_sharpness         = 0;
 						pdecinfo->dec_frame_num = 0;
-						p_input_stream_info->p_pkt->size = 0;
 						p_input_stream_info->p_pkt->data += p_input_stream_info->p_pkt->size;
+						p_input_stream_info->p_pkt->size = 0;
 						goto NEXT;
 					}
 
@@ -6619,6 +6717,7 @@ DECODE_ORG_BITS:
 								  pdecinfo->pix_fmt, pdecinfo->width, pdecinfo->height);
 					sharpness = get_unsharp_val(pdecinfo->video_dst_data[0],
 									pdecinfo->width, pdecinfo->height, 1.0, 5, 5);
+					//printf("frame_num %d sharpness %d\n", pdecinfo->dec_frame_num, sharpness);
 					total_sharpness += sharpness;
 
 					if (pdecinfo->dec_frame_num < DECODE_FRAME_NUM_PER_GOP) {
@@ -6641,6 +6740,59 @@ DECODE_ORG_BITS:
 	}
 
 	end_of_file = 1;
+
+	printf("width %d height %d line %d\n", p_input_stream_info->width, p_input_stream_info->height, __LINE__);
+
+	if (1)
+	{
+		#if 0
+		memcpy(p_temp_input_stream_info, p_input_stream_info, sizeof(InputStreamInfo));
+		ret = avcodec_send_packet(p_input_stream_info->p_video_codecctx, NULL);
+		if (ret != 0) {
+			fprintf(stderr, "ret %x AVERROR(EAGAIN) %x AVERROR_EOF %x AVERROR(EINVAL) %x AVERROR(ENOMEM) %x\n", 
+					ret, AVERROR(EAGAIN), AVERROR_EOF, AVERROR(EINVAL), AVERROR(ENOMEM));
+			fprintf(stderr, "Eagle: Error sending a packet for decoding line %d\n", __LINE__);
+			return ret;
+		}
+
+		while (ret == 0) {
+			ret = avcodec_receive_frame(p_input_stream_info->p_video_codecctx, p_input_stream_info->p_frame);
+			if (ret == AVERROR(EAGAIN)) {
+				break;
+			} else if (ret == AVERROR_EOF) {
+				fprintf(stderr, "Eagle: Receive frame error AVERROR_EOF line %d\n", __LINE__);
+				end_of_file = 1;
+				break;
+			} else if (ret < 0) {
+				fprintf(stderr, "Eagle: Error during decoding\n");
+				break;
+			}
+
+			av_image_copy(pdecinfo->video_dst_data, pdecinfo->video_dst_linesize,
+						  (const uint8_t *)(p_input_stream_info->p_frame->data),
+						  p_input_stream_info->p_frame->linesize,
+						  pdecinfo->pix_fmt, pdecinfo->width, pdecinfo->height);
+			sharpness = get_unsharp_val(pdecinfo->video_dst_data[0],
+							pdecinfo->width, pdecinfo->height, 1.0, 5, 5);
+			printf("frame_num %d sharpness %d\n", pdecinfo->dec_frame_num, sharpness);
+			total_sharpness += sharpness;
+
+			pdecinfo->dec_frame_num++;
+		}
+
+		printf("width %d height %d line %d\n", p_input_stream_info->width, p_input_stream_info->height, __LINE__);
+		#endif
+		pixel_sharpness_val = (float)((float)total_sharpness / pdecinfo->dec_frame_num)/(float)(p_input_stream_info->p_frame->width)/(float)(p_input_stream_info->p_frame->height);
+		printf("total_sharpness %ld pixel_sharpness_val %f dec_frame_num %d\n", 
+			total_sharpness, pixel_sharpness_val, pdecinfo->dec_frame_num);
+		global_frames_of_gop_array[global_decode_gop_num] = pdecinfo->dec_frame_num;
+		global_unsharp_array[global_decode_gop_num++] = pixel_sharpness_val;
+		pdecinfo->dec_frame_num = 0;
+		p_input_stream_info->p_pkt->data += p_input_stream_info->p_pkt->size;
+		p_input_stream_info->p_pkt->size = 0;
+
+		//memcpy(p_input_stream_info, p_temp_input_stream_info, sizeof(InputStreamInfo));		
+		}
 
 NEXT:
 	// convert the yuv to crf5segment
@@ -6670,7 +6822,7 @@ NEXT:
 
 	ret = unsharp_decoded_yuv(pfilterinfoOne, pmeminfo, p_input_stream_info, fp_filter, 1);
 
-	for (int crf = 25; crf <= 25; crf++) {		
+	for (int crf = 25; crf <= 40; crf++) {		
 		//3. encode the yuv data decoded in part 2 to h264 file, using crf 18..(FHD start crf = 25)
         if ((ret = encode_prepare(p_input_stream_info, pencinfo, pdecinfo, 1)) < 0) {
             fprintf(stderr, "Eagle: encode prepare fail\n");
@@ -6735,6 +6887,7 @@ NEXT:
 
 			stage1_vmaf_score = (stage1_vmaf_score > 99.0) ? 99.0 : ((stage1_vmaf_score < 97.0) ? 97.0 : stage1_vmaf_score);
 			printf("vmaf_score %f\n", stage1_vmaf_score);
+			global_target_score_array[global_stage1_gop_num++] = stage1_vmaf_score;
 			stage1_prev_bitrate =
 				 stage1_bitrate =
 				 stage1_vmaf_score 		=
@@ -6783,11 +6936,12 @@ NEXT:
         				do_ms_ssim, pool_method, n_thread, n_subsample, enable_conf_interval);
 		printf("stage 2 vmaf_score %f\n", vmaf_score);
 
-		if (vmaf_score < 97) {
+		if (vmaf_score < global_target_score_array[global_stage2_gop_num]) {
 			printf("crf %d vmaf_score %f\n", crf, vmaf_score);
 			free(s);
 			s = NULL;
 			saved_data_size_filtered = 0;
+			global_crf_array[global_stage2_gop_num++] = (float)crf;
 			break;
 		}
 
@@ -6830,11 +6984,15 @@ int main(int argc, char **argv)
 {
     int i, ret;
     BenchmarkTimeStamps ti;
+	struct timeval start, end;
+	gettimeofday(&start, NULL);
 	printf("start the fristPartofPreProcess, argv[1] %s \n", argv[1]);
     //TODO:The first process is to get the target_vmaf and sharpness value for each segment
-    FristPartofPreProcess(argv[1]);
+    FristPartofPreProcess(argv[2]);
+	gettimeofday(&end, NULL);
+	printf("interval = %ld\n", 1000000*(end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec));
 
-    return 0;
+    //return 0;
 
     init_dynload();
 
@@ -6851,6 +7009,7 @@ int main(int argc, char **argv)
         argc--;
         argv++;
     }
+	printf("fun %s line %d\n", __FUNCTION__, __LINE__);
 
 #if CONFIG_AVDEVICE
     avdevice_register_all();
@@ -6869,6 +7028,7 @@ int main(int argc, char **argv)
         av_log(NULL, AV_LOG_WARNING, "Use -h to get full help or, even better, run 'man %s'\n", program_name);
         exit_program(1);
     }
+	printf("fun %s line %d\n", __FUNCTION__, __LINE__);
 
     /* file converter / grab */
     if (nb_output_files <= 0) {
@@ -6882,8 +7042,10 @@ int main(int argc, char **argv)
     }
 
     current_time = ti = get_benchmark_time_stamps();
+	printf("fun %s line %d\n", __FUNCTION__, __LINE__);
     if (transcode() < 0)
         exit_program(1);
+	printf("fun %s line %d\n", __FUNCTION__, __LINE__);
     if (do_benchmark) {
         int64_t utime, stime, rtime;
         current_time = get_benchmark_time_stamps();
@@ -6894,11 +7056,17 @@ int main(int argc, char **argv)
                "bench: utime=%0.3fs stime=%0.3fs rtime=%0.3fs\n",
                utime / 1000000.0, stime / 1000000.0, rtime / 1000000.0);
     }
+	printf("fun %s line %d\n", __FUNCTION__, __LINE__);
     av_log(NULL, AV_LOG_DEBUG, "%"PRIu64" frames successfully decoded, %"PRIu64" decoding errors\n",
            decode_error_stat[0], decode_error_stat[1]);
     if ((decode_error_stat[0] + decode_error_stat[1]) * max_error_rate < decode_error_stat[1])
         exit_program(69);
 
+	gettimeofday(&end, NULL);
+	printf("interval = %ld\n", 1000000*(end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec));
     exit_program(received_nb_signals ? 255 : main_return_code);
-    return main_return_code;
+	gettimeofday(&end, NULL);
+	printf("interval = %ld\n", 1000000*(end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec));
+
+	return main_return_code;
 }
