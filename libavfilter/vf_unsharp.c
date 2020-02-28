@@ -275,8 +275,12 @@ static av_cold void uninit(AVFilterContext *ctx)
 }
 
 #define TOTAL_GOP_NUM 1000
-extern float global_unsharp_array[TOTAL_GOP_NUM];
-extern int   global_frames_of_gop_array[TOTAL_GOP_NUM];
+float global_unsharp_array[TOTAL_GOP_NUM] = {0.0};
+//extern int   global_frames_of_gop_array[TOTAL_GOP_NUM];
+//extern long long filtered_frame_num;
+int global_gop = 0;
+//extern int total_gop_num;
+
 static int filter_frame(AVFilterLink *link, AVFrame *in)
 {
     UnsharpContext *s = link->dst->priv;
@@ -289,7 +293,8 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
     //example:s->lamount = unsharp_value;
     //static int frame_num = 0;
 	//printf("filter_frame frame_num %d\n", frame_num++);
-	s->lamount = 0.9;
+
+	s->lamount = global_unsharp_array[global_gop];
 
     out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
     if (!out) {
