@@ -1066,7 +1066,7 @@ int gop_num = 0;
 
 #define TOTAL_GOP_NUM 1000
 
-float global_target_score_array[TOTAL_GOP_NUM] = {0.0};
+int global_target_score_array[TOTAL_GOP_NUM] = {0.0};
 float global_crf_array[TOTAL_GOP_NUM] = {0.0};
 extern float global_unsharp_array[TOTAL_GOP_NUM];
 float global_aq_strength_array[TOTAL_GOP_NUM] = {0.0};
@@ -1395,22 +1395,8 @@ static void do_video_out(OutputFile *of,
 			x4->params.rc.f_rf_constant = x4->crf         = global_crf_array[global_gop];
 			x4->params.rc.f_aq_strength = x4->aq_strength = global_aq_strength_array[global_gop];
 			x264_encoder_reconfig(x4->enc, &x4->params);
-	        //printf("ost->frames_encoded %d crf %f aq_strength %f\n", 
-			//	ost->frames_encoded, global_crf_array[global_gop], global_aq_strength_array[global_gop]);
-			
-			#if 0
-	        if (ost->frames_encoded <= 319) {
-		        X264Context *x4 = enc->priv_data;
-				x4->params.rc.f_rf_constant = x4->crf = 30;
-				x4->params.rc.f_aq_strength = x4->aq_strength = 1.2;
-				x264_encoder_reconfig(x4->enc, &x4->params);
-	        } else {
-		        X264Context *x4 = enc->priv_data;
-				x4->params.rc.f_rf_constant = x4->crf = 33;
-				x4->params.rc.f_aq_strength = x4->aq_strength = 1.3;
-				x264_encoder_reconfig(x4->enc, &x4->params);
-			}
-			#endif
+	        //printf("ost->frames_encoded %d global_gop %d crf %f aq_strength %f\n",
+			//	ost->frames_encoded, global_gop, global_crf_array[global_gop], global_aq_strength_array[global_gop]);	
         }
 
         ret = avcodec_send_frame(enc, in_picture);
@@ -6593,7 +6579,7 @@ static int FristPartofPreProcess(char *filename)
 	double vmaf_score = 0.0;
 	float stage2_score_in = 0.0;
 	float stage2_score_diff = 0.0;
-	float stage2_crf_step = 0.0;
+	float stage2_crf_step = 1.0;
 	float stage2_bitrate_in = 0.0;
 	float stage2_step_vmaf = 0.0;
 	float stage2_vmaf_diff = 0.0;
@@ -6601,11 +6587,24 @@ static int FristPartofPreProcess(char *filename)
 	float stage2_best_bitrate = 1000000;
 	float stage2_best_vmaf_diff = 100;
 	float stage2_best_vmaf = 0;
+	int   stage2_best_crf  = 0;
+	int   stage2_early_stop = 0;
+	int   stage2_loop_count = 0;
+	int   stage2_resolution_num = 1;
+	int   stage2_first_flag = 1;
 	float stage2_last_crf = 18.0;
+	int   stage2_start_crf = 18;
 	struct newData *s = NULL;
-	int disable_clip = 0, disable_avx = 0, enable_transform = 0, phone_model = 1;
+	int disable_clip = 0, disable_avx = 0, enable_transform = 0, phone_model = 0;
 	int do_psnr = 0, do_ssim = 0, do_ms_ssim = 0, n_thread = 1, n_subsample = 1, enable_conf_interval = 0; 
     int video_stream_idx = -1, audio_stream_idx = -1;
+
+	struct timeval before_crf5_part,  after_crf5_part  = {0};
+	long long crf5_time_val = 0;
+	struct timeval before_loop1_part, after_loop1_part = {0};
+	long long loop1_time_val = 0;
+	struct timeval before_loop2_part, after_loop2_part = {0};
+	long long loop2_time_val;
 
 	//crf & bitrate & target_score
 	float stage1_prev_bitrate = 0.0, stage1_bitrate = 0.0;
@@ -6616,7 +6615,7 @@ static int FristPartofPreProcess(char *filename)
 	int stage1_crf = 0, stage2_crf = 0;
 	int min_score = 97, max_score = 99;
 	float target_per_score = 400;
-	static int stage1_first_flag = 1, stage2_first_flag = 1;
+	static int stage1_first_flag = 1;
 
     DecodeInfo *pdecinfo = (DecodeInfo *)malloc(sizeof(DecodeInfo));
 	if (pdecinfo != NULL) {
@@ -6838,6 +6837,8 @@ DECODE_ORG_BITS:
 		}
 
 NEXT:
+	gettimeofday(&before_crf5_part, NULL);
+
 	// convert the yuv to crf5segment
 	ret = encode_prepare(p_input_stream_info, pencinfo, pdecinfo, 0);
 	if (ret < 0) {
@@ -6862,6 +6863,13 @@ NEXT:
 	memcpy(pmeminfo->pVideoBufferCrf5, pmeminfo->pDecodeVideoBuffer, FHD_BUFFER_SIZE);
 	saved_data_size = 0;
 	saved_size = 0;
+
+	gettimeofday(&after_crf5_part, NULL);
+	crf5_time_val += 1000000 * (after_crf5_part.tv_sec - before_crf5_part.tv_sec) + (after_crf5_part.tv_usec - before_crf5_part.tv_usec);
+	printf("crf5_time_val %ld\n", crf5_time_val);
+
+
+	gettimeofday(&before_loop1_part, NULL);
 
 	ret = unsharp_decoded_yuv(pfilterinfoOne, pmeminfo, p_input_stream_info, fp_filter, 1);
 
@@ -6898,7 +6906,7 @@ NEXT:
 
 		compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
         				disable_clip, disable_avx, enable_transform, phone_model, do_psnr, do_ssim, 
-        				do_ms_ssim, pool_method, n_thread, n_subsample, enable_conf_interval);
+        				do_ms_ssim, pool_method, n_thread, 5/*n_subsample*/, enable_conf_interval);
 		//printf("stage 1 vmaf_score %f\n", vmaf_score);
 		//exit(1);
 		free(s);
@@ -6928,8 +6936,11 @@ NEXT:
 			printf("stage1_vmaf_score final result %f crf %d stage1_per_score %f\n", 
 					stage1_vmaf_score, crf, stage1_per_score);
 
-			stage1_vmaf_score = (stage1_vmaf_score > 99.0) ? 99.0 : ((stage1_vmaf_score < 97.0) ? 97.0 : stage1_vmaf_score);
+			stage1_vmaf_score = (stage1_vmaf_score > 96.0) ? 96.0 : ((stage1_vmaf_score < 91.0) ? 91.0 : stage1_vmaf_score);
 			printf("vmaf_score %f\n", stage1_vmaf_score);
+			if (stage1_vmaf_score - 2 >= 91.0) {
+				stage1_vmaf_score = stage1_vmaf_score - 2.0;
+			}
 			global_target_score_array[global_stage1_gop_num++] = stage1_vmaf_score;
 			stage1_prev_bitrate =
 				 stage1_bitrate =
@@ -6950,15 +6961,30 @@ NEXT:
 	}
 	stage1_first_flag = 1;
 	//exit(1);
+	gettimeofday(&after_loop1_part, NULL);
+	loop1_time_val += 1000000 * (after_loop1_part.tv_sec - before_loop1_part.tv_sec) + (after_loop1_part.tv_usec - before_loop1_part.tv_usec);
+	printf("loop1_time_val %ld\n", loop1_time_val);
 
 	gop_num++;
+
     //6. unsharp the decoded yuv data
 
+	gettimeofday(&before_loop2_part, NULL);
     ret = unsharp_decoded_yuv(pfilterinfo, pmeminfo, p_input_stream_info, fp_filter, 0);
 	printf("unsharp_decoded_yuv done\n");
 	stage2_last_crf = 18;
+
+	stage2_best_bitrate = 1000000;
+	stage2_best_vmaf_diff = 100;
+	stage2_best_vmaf  = 0;
+	stage2_early_stop = 0;
+	stage2_loop_count = 0;
+	stage2_first_flag = 1;
+	stage2_crf_step   = 1.0;
+	stage2_start_crf  = 18;
 	//if (gop_num == 2)
-	for (int crf = 18; crf <= 32; /*crf++*/) {
+
+	for (int crf = 18; crf <= 45; /*crf++*/) {
 
     	//7. encode the filtered frame to get the crf
 		//printf("before enc_filtered_yuv_to_264\n");
@@ -6985,9 +7011,28 @@ NEXT:
 		printf("compute_vmaf done\n");
 		//printf("stage 2 vmaf_score %f\n", vmaf_score);
 
-		stage2_score_in = vmaf_score;
+		stage2_score_in   = vmaf_score;
 		stage2_bitrate_in = (float)((float)saved_data_size_filtered / 1024) / (float)((float)(FILTERED_FRAME_NUM_PER_GOP - 2) / 30) * 8;
-		stage2_vmaf_diff = stage2_score_in - global_target_score_array[global_stage2_gop_num];
+		stage2_vmaf_diff  = stage2_score_in - global_target_score_array[global_stage2_gop_num];
+
+		if (global_target_score_array[global_stage2_gop_num] != 0) {
+
+		}
+
+		//early stop
+
+		//best descition
+		if ((stage2_vmaf_diff > -1 && stage2_bitrate_in < stage2_best_bitrate) || stage2_first_flag) {
+			stage2_best_bitrate   = stage2_bitrate_in;
+			stage2_best_vmaf_diff = stage2_vmaf_diff;
+			stage2_best_vmaf      = stage2_score_in;
+			stage2_best_crf       = crf;
+			stage2_first_flag     = 0;
+		}
+
+		if (abs(stage2_vmaf_diff) < 1 && stage2_vmaf_diff < 0.2) {
+			//break;
+		}
 
 		//crf descition
 		stage2_step_vmaf_res = (float)((crf - 18) / 10.0);
@@ -7012,17 +7057,19 @@ NEXT:
 			if (crf < stage2_last_crf){
 				//getchar();
 				saved_data_size_filtered = 0;
-				global_crf_array[global_stage2_gop_num++] = (float)crf;
+				global_crf_array[global_stage2_gop_num++] = (int)crf;
+				stage2_last_crf = crf;
 				printf("global_crf_array[%d] %f\n", global_stage2_gop_num - 1, global_crf_array[global_stage2_gop_num-1]);
 				free(s);
 				s = NULL;
 				break;
 			}
 		} else {
-			if ((crf == stage2_last_crf + 1) || (crf == 18) || (crf == stage2_last_crf - 1)) {
+			if ((crf == stage2_last_crf + 1) || (crf == stage2_start_crf) || (crf == 18) || (crf == stage2_last_crf - 1)) {
 				//printf("break line %d\n", __LINE__);
 				saved_data_size_filtered = 0;
-				global_crf_array[global_stage2_gop_num++] = (float)crf;
+				global_crf_array[global_stage2_gop_num++] = (int)crf;
+				stage2_last_crf = crf;
 				printf("global_crf_array[%d] %f\n", global_stage2_gop_num - 1, global_crf_array[global_stage2_gop_num-1]);
 				free(s);
 				s = NULL;
@@ -7044,12 +7091,17 @@ NEXT:
 		printf("stage2_crf_step %f\n", stage2_crf_step);
 		crf = (int)(crf + stage2_crf_step);
 
+		if (global_target_score_array[global_stage2_gop_num] != 0) {
+			stage2_start_crf = stage2_start_crf - 3;
+		}
+
 		if (vmaf_score < global_target_score_array[global_stage2_gop_num]) {
-			printf("crf %d vmaf_score %f\n", crf, vmaf_score);
+			printf("crf %d vmaf_score %f global_crf_array[%d] %f\n",
+				crf, vmaf_score, global_stage2_gop_num, global_crf_array[global_stage2_gop_num]);
 			free(s);
 			s = NULL;
 			saved_data_size_filtered = 0;
-			global_crf_array[global_stage2_gop_num++] = (float)crf;
+			global_crf_array[global_stage2_gop_num++] = (int)crf;
 			break;
 		}
 
@@ -7058,6 +7110,12 @@ NEXT:
 		saved_data_size_filtered = 0;
 	}
 	//exit(0);
+	gettimeofday(&after_loop2_part, NULL);
+	loop2_time_val += 1000000 * (after_loop2_part.tv_sec - before_loop2_part.tv_sec) + (after_loop2_part.tv_usec - before_loop2_part.tv_usec);
+	printf("loop2_time_val %ld\n", loop2_time_val);
+
+	printf("Statistics Time crf5_time_val %ld loop1_time_val %ld loop2_time_val %ld\n", 
+			crf5_time_val, loop1_time_val, loop2_time_val);
 
 	if (end_of_file) {
 		free(pmeminfo->pVideoBuffer); 		pmeminfo->pVideoBuffer 		  = NULL;
