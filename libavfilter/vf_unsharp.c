@@ -291,8 +291,8 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
     //TODO:eagle should add
     //add the unsharp_value
     //example:s->lamount = unsharp_value;
-    //static int frame_num = 0;
-	//printf("filter_frame frame_num %d\n", frame_num++);
+    static int frame_num = 0;
+	//printf("filter_frame frame_num %d s->lamount %f\n", frame_num++, global_unsharp_array[global_gop]);
 
 	s->lamount = global_unsharp_array[global_gop];
 
