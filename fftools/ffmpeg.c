@@ -4951,7 +4951,7 @@ static void log_callback_null(void *ptr, int level, const char *fmt, va_list vl)
 //#include <x264.h>
 #include <malloc.h>
 #define MAX_MATRIX_SIZE 63
-#define FHD_BUFFER_SIZE 0x956A000 //1920*1088*50*3/2
+#define FHD_BUFFER_SIZE 0x9867000 //1920*1088*51*3/2 //0x956A000 //1920*1088*50*3/2
 
 #define INBUF_SIZE 1024*1024*300
 #define DECODE_FRAME_NUM_PER_GOP 50
@@ -5162,8 +5162,8 @@ static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int
 	if (first_flag) {
 		first_flag = 0;
 		if (stage == 1) {
-			reserved_ref = width * height * (DECODE_FRAME_NUM_PER_GOP - 1) * 3 / 2;
-			reserved_dis = width * height * (DECODE_FRAME_NUM_PER_GOP - 1) * 3 / 2;
+			reserved_ref = width * height * (DECODE_FRAME_NUM_PER_GOP - 5) * 3 / 2;
+			reserved_dis = width * height * (DECODE_FRAME_NUM_PER_GOP - 5) * 3 / 2;
 		} else if (stage == 2) {
 			reserved_ref = width * height * (FILTERED_FRAME_NUM_PER_GOP - 5) * 3 / 2;
 			reserved_dis = width * height * (FILTERED_FRAME_NUM_PER_GOP - 5) * 3 / 2;
@@ -5181,12 +5181,12 @@ static int read_image_new_b(uint8_t *data, float *buf, float off, int width, int
 
 		if (ref_flag) {
 			if (stage == 1)
-				memcpy(tmp_buf, data + (DECODE_FRAME_NUM_PER_GOP - 1) * width * height * 3 / 2 - reserved_ref + i * width, width);
+				memcpy(tmp_buf, data + (DECODE_FRAME_NUM_PER_GOP - 5) * width * height * 3 / 2 - reserved_ref + i * width, width);
 			else if (stage == 2)
 				memcpy(tmp_buf, data + (FILTERED_FRAME_NUM_PER_GOP - 5) * width * height * 3 / 2 - reserved_ref + i * width, width);
 		} else {
 			if (stage == 1)
-				memcpy(tmp_buf, data + (DECODE_FRAME_NUM_PER_GOP - 1) * width * height * 3 / 2 - reserved_dis + i * width, width);
+				memcpy(tmp_buf, data + (DECODE_FRAME_NUM_PER_GOP - 5) * width * height * 3 / 2 - reserved_dis + i * width, width);
 			else if (stage == 2)
 				memcpy(tmp_buf, data + (FILTERED_FRAME_NUM_PER_GOP - 5)* width * height * 3 / 2 - reserved_dis + i * width, width);
 		}
@@ -5502,11 +5502,11 @@ static int encode_frame(InputStreamInfo *p_input_stream_info, EncodeInfo *p_enc_
 
 			if (!filtered_flag)
 			{
-				FILE *fp = fopen("./encode264.264", "wb");
-				if (first_loop)
-					fwrite(p_enc_info->p_pkt->data, 1, p_enc_info->p_pkt->size, fp);
-				fflush(fp);
-				fclose(fp);
+				//FILE *fp = fopen("./encode264.264", "ab");
+				//if (first_loop)
+				//	fwrite(p_enc_info->p_pkt->data, 1, p_enc_info->p_pkt->size, fp);
+				//fflush(fp);
+				//fclose(fp);
 				//save the h264 format data into buffer to decode it
 				memcpy(pmeminfo->pEncodeVideoBuffer + saved_data_size, p_enc_info->p_pkt->data, p_enc_info->p_pkt->size);
 				if (receive_frame_num < receive_frame_total_num) {
@@ -5517,8 +5517,8 @@ static int encode_frame(InputStreamInfo *p_input_stream_info, EncodeInfo *p_enc_
 				saved_data_size += p_enc_info->p_pkt->size;
 				enc_pkt_size[enc_frame_num++] = p_enc_info->p_pkt->size;
 			} else {
-				//FILE *fp = fopen("./encode264_filtered.bin", "ab");
-				  //fwrite(p_enc_info->p_pkt->data, 1, p_enc_info->p_pkt->size, fp);
+				//FILE *fp = fopen("./encode264_filtered.264", "ab");
+				//fwrite(p_enc_info->p_pkt->data, 1, p_enc_info->p_pkt->size, fp);
 				//fclose(fp);
 				memcpy(pmeminfo->pEncodeVideoBuffer2 + saved_data_size_filtered, p_enc_info->p_pkt->data, p_enc_info->p_pkt->size);
 				saved_data_size_filtered += p_enc_info->p_pkt->size;
@@ -5546,11 +5546,11 @@ static int encode_frame(InputStreamInfo *p_input_stream_info, EncodeInfo *p_enc_
 
 		if (!filtered_flag)
 		{
-			FILE *fp = fopen("./encode264.264", "wb");
-			if (first_loop)
-				fwrite(p_enc_info->p_pkt->data, 1, p_enc_info->p_pkt->size, fp);
-			fflush(fp);
-			fclose(fp);
+			//FILE *fp = fopen("./encode264.264", "ab");
+			//if (first_loop)
+			//	fwrite(p_enc_info->p_pkt->data, 1, p_enc_info->p_pkt->size, fp);
+			//fflush(fp);
+			//fclose(fp);
 			//save the h264 format data into buffer to decode it
 			memcpy(pmeminfo->pEncodeVideoBuffer + saved_data_size, p_enc_info->p_pkt->data, p_enc_info->p_pkt->size);
 			if (receive_frame_num < receive_frame_total_num) {
@@ -5561,15 +5561,14 @@ static int encode_frame(InputStreamInfo *p_input_stream_info, EncodeInfo *p_enc_
 			saved_data_size += p_enc_info->p_pkt->size;
 			enc_pkt_size[enc_frame_num++] = p_enc_info->p_pkt->size;
 		} else {
-			FILE *fp = fopen("./encode264_filtered.bin", "ab");
+			//FILE *fp = fopen("./encode264_filtered.264", "ab");
 			//fwrite(p_enc_info->p_pkt->data, 1, p_enc_info->p_pkt->size, fp);
-			fclose(fp);
+			//fclose(fp);
 			memcpy(pmeminfo->pEncodeVideoBuffer2 + saved_data_size_filtered, p_enc_info->p_pkt->data, p_enc_info->p_pkt->size);
 			saved_data_size_filtered += p_enc_info->p_pkt->size;
 			enc_pkt_size_filtered[enc_frame_num++] = p_enc_info->p_pkt->size;
 		}
 		av_packet_unref(p_enc_info->p_pkt);
-		//printf("flush success 2\n");
 	}
 
 	enc_frame_num = 0;
@@ -5577,7 +5576,7 @@ static int encode_frame(InputStreamInfo *p_input_stream_info, EncodeInfo *p_enc_
 	return 0;
 }
 
-static int encode_prepare(InputStreamInfo *p_input_stream_info, EncodeInfo *p_enc_info, DecodeInfo *p_dec_info, int tune_flag)
+static int encode_prepare(InputStreamInfo *p_input_stream_info, EncodeInfo *p_enc_info, DecodeInfo *p_dec_info, int tune_flag, int fps)
 {
     int ret = 0;
     enum AVCodecID codec_id = AV_CODEC_ID_H264;
@@ -5597,8 +5596,10 @@ static int encode_prepare(InputStreamInfo *p_input_stream_info, EncodeInfo *p_en
     p_enc_info->codecCtx->width     = p_dec_info->width;
     p_enc_info->codecCtx->height    = p_dec_info->height;
     p_enc_info->codecCtx->pix_fmt   = AV_PIX_FMT_YUV420P;
-	p_enc_info->codecCtx->time_base = (AVRational){1, 24};
-	p_enc_info->codecCtx->framerate = (AVRational){24, 1};
+	p_enc_info->codecCtx->time_base = (AVRational){1, fps};
+	p_enc_info->codecCtx->framerate = (AVRational){fps, 1};
+
+	printf("fps %d\n", fps);
 
     av_opt_set(p_enc_info->codecCtx->priv_data, "profile", "high",   0);
     av_opt_set(p_enc_info->codecCtx->priv_data, "preset",  "medium", 0);
@@ -5816,7 +5817,7 @@ static int get_input_fmt(InputStreamInfo **pp_input_stream_info, char *filename)
     }
 
     //dump input information
-    //av_dump_format(p_input_stream_info->p_fmt_ctx, 0, filename, 0);
+    av_dump_format(p_input_stream_info->p_fmt_ctx, 0, filename, 0);
 
     //retrive stream information
     if ((ret = avformat_find_stream_info(p_input_stream_info->p_fmt_ctx, NULL) < 0)) {
@@ -6295,7 +6296,7 @@ end:
 	return 0;
 }
 
-static int enc_filtered_yuv_to_264(MemInfo *pmeminfo, float crf_val, const InputStreamInfo *p_input_stream_info)
+static int enc_filtered_yuv_to_264(MemInfo *pmeminfo, float crf_val, const InputStreamInfo *p_input_stream_info, int fps)
 {
 	int ret = 0;
 	static int enc_frame_num = 0;
@@ -6321,8 +6322,8 @@ static int enc_filtered_yuv_to_264(MemInfo *pmeminfo, float crf_val, const Input
 	pcodecCtx->width     = p_input_stream_info->p_frame->width;
 	pcodecCtx->height    = p_input_stream_info->p_frame->height;
 	pcodecCtx->pix_fmt   = AV_PIX_FMT_YUV420P;
-	pcodecCtx->time_base = (AVRational){1, 24};
-	pcodecCtx->framerate = (AVRational){24, 1};
+	pcodecCtx->time_base = (AVRational){1, fps};
+	pcodecCtx->framerate = (AVRational){fps, 1};
 
 	av_opt_set(pcodecCtx->priv_data, "profile", "high",   0);
 	av_opt_set(pcodecCtx->priv_data, "preset",  "medium", 0);
@@ -6569,7 +6570,7 @@ static float get_aq_strength(float pixel_unsharpness)
 }
 
 //decode the mp4 format h264 codec to yuv,
-static int FristPartofPreProcess(char *filename)
+static int FristPartofPreProcess(char *filename, int fps)
 {
 	int end_of_file = 0;
 	const char *fmt = "yuv420p";
@@ -6703,6 +6704,10 @@ static int FristPartofPreProcess(char *filename)
         fprintf(stderr, "Eagle: get input format info fail\n");
         return ret;
     }
+	//printf("p_input_stream_info %p\n", p_input_stream_info);
+	//printf("avg_frame_rate %d %d\n", p_input_stream_info->p_fmt_ctx->streams[0]->avg_frame_rate.den,
+	//	p_input_stream_info->p_fmt_ctx->streams[0]->avg_frame_rate.num);
+	//exit(0);
 
     if ((ret = open_codecs_and_contexts(&p_input_stream_info)) != 0) {
         fprintf(stderr, "Eagle: oepn codec and contexts fail\n");
@@ -6763,13 +6768,13 @@ DECODE_ORG_BITS:
 								  pdecinfo->pix_fmt, pdecinfo->width, pdecinfo->height);
 					sharpness = get_unsharp_val(pdecinfo->video_dst_data[0],
 									pdecinfo->width, pdecinfo->height, 1.0, 5, 5);
-					printf("frame_num %d sharpness %d\n", pdecinfo->dec_frame_num, sharpness);
+					//printf("frame_num %d sharpness %d\n", pdecinfo->dec_frame_num, sharpness);
 					total_sharpness += sharpness;
 
-					if (pdecinfo->dec_frame_num < DECODE_FRAME_NUM_PER_GOP) {
+					if (pdecinfo->dec_frame_num <= DECODE_FRAME_NUM_PER_GOP) {
 						memcpy(pmeminfo->pVideoBuffer + pdecinfo->dec_frame_num * pdecinfo->width * pdecinfo->height * 3 / 2,
 								pdecinfo->video_dst_data[0], pdecinfo->width * pdecinfo->height * 3 / 2);
-						fwrite(pdecinfo->video_dst_data[0], 1, pdecinfo->video_dst_bufsize, inputpar.video_dst_file);
+						//fwrite(pdecinfo->video_dst_data[0], 1, pdecinfo->video_dst_bufsize, inputpar.video_dst_file);
 					}
 
 					pdecinfo->dec_frame_num++;
@@ -6844,7 +6849,7 @@ NEXT:
 	gettimeofday(&before_crf5_part, NULL);
 
 	// convert the yuv to crf5segment
-	ret = encode_prepare(p_input_stream_info, pencinfo, pdecinfo, 0);
+	ret = encode_prepare(p_input_stream_info, pencinfo, pdecinfo, 0, fps);
 	if (ret < 0) {
 		fprintf(stderr, "Eagle: encode crf 5 prepare fail done\n");
 		return ret;
@@ -6865,26 +6870,20 @@ NEXT:
 		return ret;
 	}
 	memcpy(pmeminfo->pVideoBufferCrf5, pmeminfo->pDecodeVideoBuffer, FHD_BUFFER_SIZE);
+
 	saved_data_size = 0;
 	saved_size = 0;
 
 	gettimeofday(&after_crf5_part, NULL);
 	crf5_time_val += 1000000 * (after_crf5_part.tv_sec - before_crf5_part.tv_sec) + (after_crf5_part.tv_usec - before_crf5_part.tv_usec);
-	printf("crf5_time_val %ld\n", crf5_time_val);
-
 
 	gettimeofday(&before_loop1_part, NULL);
 
 	ret = unsharp_decoded_yuv(pfilterinfoOne, pmeminfo, p_input_stream_info, fp_filter, 1);
-	{
-		FILE *fp = (FILE *)fopen("./pVideoBuffer.yuv", "wb");
-		fwrite(pmeminfo->pVideoBuffer1, FHD_BUFFER_SIZE, 1, fp);
-		fclose(fp);
-	}
 
 	for (int crf = 25; crf <= 50; crf++) {		
 		//3. encode the yuv data decoded in part 2 to h264 file, using crf 18..(FHD start crf = 25)
-        if ((ret = encode_prepare(p_input_stream_info, pencinfo, pdecinfo, 1)) < 0) {
+        if ((ret = encode_prepare(p_input_stream_info, pencinfo, pdecinfo, 1, fps)) < 0) {
             fprintf(stderr, "Eagle: encode prepare fail\n");
             return ret;
         }
@@ -6893,8 +6892,6 @@ NEXT:
     		fprintf(stderr, "Eagle: encode frame fail\n");
     		return ret;
     	}
-
-		//printf("saved_data_size %d saved_size %d\n", saved_data_size, saved_size);
 
 		avcodec_close(pencinfo->codecCtx);
 		avcodec_free_context(&(pencinfo->codecCtx));
@@ -6915,9 +6912,8 @@ NEXT:
 
 		compute_vmaf(&vmaf_score, fmt, vmaf_width, vmaf_height, read_frame_new, s, model_path, log_file, NULL,
         				disable_clip, disable_avx, enable_transform, phone_model, do_psnr, do_ssim, 
-        				do_ms_ssim, pool_method, n_thread, 1/*n_subsample*/, enable_conf_interval);
+        				do_ms_ssim, pool_method, n_thread, 5/*n_subsample*/, enable_conf_interval);
 		//printf("stage 1 vmaf_score %f\n", vmaf_score);
-		//exit(1);
 		free(s);
 		s = NULL;
 
@@ -6929,7 +6925,7 @@ NEXT:
 		pdec264fmtinfo->inbuf = NULL;
 
 		stage1_vmaf_score = vmaf_score;
-		stage1_bitrate = (float)((float)saved_size / 1024) / (float)((float)(DECODE_FRAME_NUM_PER_GOP - 2) / 24) * 8;
+		stage1_bitrate = (float)((float)saved_data_size / 1024) / (float)((float)(DECODE_FRAME_NUM_PER_GOP - 1) / fps) * 8;
 
 		if ((fabs(stage1_vmaf_score - stage1_prev_vmaf_score) <= 1e-6) || stage1_first_flag){
 			stage1_first_flag = 0;
@@ -6940,17 +6936,13 @@ NEXT:
 
 		printf("stage1_gop %d bitrate %f prev_bitrate %f vmaf_score %f prev_vmaf_score %f crf %d per_score %f saved_data_size %d saved_size %d \n",
 				global_stage1_gop_num, stage1_bitrate, stage1_prev_bitrate, stage1_vmaf_score, stage1_prev_vmaf_score, crf, stage1_per_score, saved_data_size, saved_size);
-		getchar();
-
+		//exit(1);
 		if (stage1_per_score <= target_per_score) {
 			printf("stage1_gop %d global_stage1_gop_num stage1_vmaf_score final result %f crf %d stage1_per_score %f stage1_bitrate %f\n", 
 					global_stage1_gop_num, stage1_vmaf_score, crf, stage1_per_score, stage1_bitrate);
 
 			stage1_vmaf_score = (stage1_vmaf_score > 96.0) ? 96.0 : ((stage1_vmaf_score < 91.0) ? 91.0 : stage1_vmaf_score);
 			printf("vmaf_score %f\n", stage1_vmaf_score);
-			//if (stage1_vmaf_score - 2 >= 91.0) {
-			//	stage1_vmaf_score = stage1_vmaf_score - 2.0;
-			//}
 
 			global_target_score_array[global_stage1_gop_num] = stage1_vmaf_score;
 			stage1_prev_bitrate =
@@ -6969,15 +6961,11 @@ NEXT:
 
 		saved_data_size = 0;
 		saved_size      = 0;
-		printf("crf %d line 6963\n", crf);
 	}
 	stage1_first_flag = 1;
-	//global_stage1_gop_num++;
 
-	//exit(1);
 	gettimeofday(&after_loop1_part, NULL);
 	loop1_time_val += 1000000 * (after_loop1_part.tv_sec - before_loop1_part.tv_sec) + (after_loop1_part.tv_usec - before_loop1_part.tv_usec);
-	printf("loop1_time_val %ld\n", loop1_time_val);
 
 	gop_num++;
 
@@ -7008,7 +6996,7 @@ NEXT:
 
     	//7. encode the filtered frame to get the crf
 		//printf("before enc_filtered_yuv_to_264\n");
-		ret = enc_filtered_yuv_to_264(pmeminfo, (float)(crf), p_input_stream_info);
+		ret = enc_filtered_yuv_to_264(pmeminfo, (float)(crf), p_input_stream_info, fps);
 		//printf("after enc_filtered_yuv_to_264\n");
 
     	//8. decode the encoded 264 raw data to yuv
@@ -7031,8 +7019,8 @@ NEXT:
 		//printf("stage 2 vmaf_score %f\n", vmaf_score);
 
 		stage2_score_in   = vmaf_score;
-		stage2_bitrate_in = (float)((float)(saved_data_size_filtered -  enc_pkt_size_filtered[5])/ 1024) / (float)((float)(FILTERED_FRAME_NUM_PER_GOP - 5) / 24) * 8;
-		stage2_vmaf_diff  = stage2_score_in - global_target_score_array[global_stage2_gop_num];
+		stage2_bitrate_in = (float)((float)(saved_data_size_filtered -  enc_pkt_size_filtered[5])/ 1024) / (float)((float)(FILTERED_FRAME_NUM_PER_GOP - 5) / fps) * 8;
+		stage2_vmaf_diff  = stage2_score_in - stage2_target_vmaf_score;
 
 		printf("crf %d compute_vmaf done vmaf_score %f bitrate_in %f size %d\n", 
 			crf, vmaf_score, stage2_bitrate_in, saved_data_size_filtered);
@@ -7054,7 +7042,7 @@ NEXT:
 		if (abs(stage2_vmaf_diff) < 1 && stage2_vmaf_diff < 0.2) {
 			printf("stage2_vmaf_diff %f crf %d line %d\n", stage2_vmaf_diff, crf, __LINE__);
 			saved_data_size_filtered = 0;
-			global_crf_array[global_stage2_gop_num] = (int)crf;
+			global_crf_array[global_stage2_gop_num] = (int)crf + 1;
 			stage2_last_crf = crf;
 			free(s);
 			//exit(0);
@@ -7078,9 +7066,9 @@ NEXT:
 
 		stage2_step_vmaf = (stage2_step_vmaf < 1) ? 1 : stage2_step_vmaf;
 
-		stage2_score_diff = stage2_score_in - global_target_score_array[global_stage2_gop_num];
+		stage2_score_diff = stage2_score_in - stage2_target_vmaf_score;
 		printf("stage2_step_vmaf stage2_score_diff target_score stage2_score_in %f %f %d %f\n",
-				stage2_step_vmaf, stage2_score_diff, global_target_score_array[global_stage2_gop_num], stage2_score_in);
+				stage2_step_vmaf, stage2_score_diff, stage2_target_vmaf_score, stage2_score_in);
 
 		if (stage2_score_diff > 0) {
 			stage2_crf_step = stage2_score_diff / stage2_step_vmaf;
@@ -7088,7 +7076,7 @@ NEXT:
 			if (crf < (int)stage2_last_crf){
 				//getchar();
 				saved_data_size_filtered = 0;
-				global_crf_array[global_stage2_gop_num] = (int)crf;
+				global_crf_array[global_stage2_gop_num] = (int)crf + 1;
 				stage2_last_crf = crf;
 				printf("global_stage2_gop_num %d global_crf_array[%d] %f\n", global_stage2_gop_num, global_stage2_gop_num, global_crf_array[global_stage2_gop_num]);
 				free(s);
@@ -7098,7 +7086,7 @@ NEXT:
 		} else {
 			if ((crf == (int)(stage2_last_crf + 1)) || (crf == (int)(stage2_start_crf)) || (crf == 18) || (crf == (int)(stage2_last_crf - 1))) {
 				saved_data_size_filtered = 0;
-				global_crf_array[global_stage2_gop_num] = (int)crf;
+				global_crf_array[global_stage2_gop_num] = (int)crf + 1;
 				printf("stage2_last_crf %d \n", stage2_last_crf);
 				stage2_last_crf = crf;
 				printf("global_stage2_gop_num %d global_crf_array[%d] %f\n", global_stage2_gop_num, global_stage2_gop_num, global_crf_array[global_stage2_gop_num]);
@@ -7123,7 +7111,7 @@ NEXT:
 		printf("stage2_crf_step %f\n", stage2_crf_step);
 		if (crf + stage2_crf_step > 32) {
 			saved_data_size_filtered = 0;
-			global_crf_array[global_stage2_gop_num] = (int)(crf);
+			global_crf_array[global_stage2_gop_num] = (int)(crf) + 1;
 			free(s);
 			s = NULL;
 			break;
@@ -7131,7 +7119,7 @@ NEXT:
 			crf = (int)(crf + stage2_crf_step);
 		}
 
-		if (vmaf_score < global_target_score_array[global_stage2_gop_num]) {
+		if (vmaf_score < stage2_target_vmaf_score) {
 			printf("global_stage2_gop_num %d crf %d vmaf_score %f global_crf_array[%d] %f\n",
 				global_stage2_gop_num, crf, vmaf_score, global_stage2_gop_num, global_crf_array[global_stage2_gop_num]);
 			free(s);
@@ -7146,7 +7134,7 @@ NEXT:
 		saved_data_size_filtered = 0;
 	}
 	printf("after one gop target_score %f global_crf_array[%d] %f\n", 
-		global_target_score_array[global_stage1_gop_num],global_stage2_gop_num, global_crf_array[global_stage2_gop_num]);
+		stage2_target_vmaf_score, global_stage2_gop_num, global_crf_array[global_stage2_gop_num]);
 	global_stage1_gop_num++;
 	global_stage2_gop_num++;
 	//exit(0);
@@ -7195,9 +7183,9 @@ int main(int argc, char **argv)
     BenchmarkTimeStamps ti;
 	struct timeval start, end;
 	gettimeofday(&start, NULL);
-	printf("start the fristPartofPreProcess, argv[1] %s \n", argv[1]);
+	printf("start the fristPartofPreProcess, argv[1] %s fps %s %f\n", argv[1], argv[12], atof(argv[12]));
     //TODO:The first process is to get the target_vmaf and sharpness value for each segment
-    FristPartofPreProcess(argv[2]);
+    FristPartofPreProcess(argv[2], ceil(atof(argv[12])));
 	gettimeofday(&end, NULL);
 	printf("interval = %ld\n", 1000000*(end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec));
 
