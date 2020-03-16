@@ -1060,6 +1060,7 @@ static void do_subtitle_out(OutputFile *of,
         output_packet(of, &pkt, ost, 0);
     }
 }
+
 #include <x264.h>
 
 int gop_num = 0;
@@ -1077,6 +1078,18 @@ int   global_stage2_gop_num = 0;
 extern int   global_gop;
 int   total_gop_num = 0;
 long long filtered_frame_num = 0;
+
+typedef struct Eagle_Param_Context {
+	float target_score_array[TOTAL_GOP_NUM];
+	float crf_array[TOTAL_GOP_NUM];
+	float aq_strength_array[TOTAL_GOP_NUM];
+	int   frames_of_gop_array[TOTAL_GOP_NUM];
+	int   decode_gop_num;
+	int   stage1_gop_num;
+	int   stage2_gop_num;
+	int   total_gop_num;
+	long long filtered_frame_num;
+}EagleParamContext;
 
 
 typedef struct X264Context {
@@ -1396,8 +1409,8 @@ static void do_video_out(OutputFile *of,
 			x4->params.rc.f_rf_constant = x4->crf         = global_crf_array[global_gop];
 			x4->params.rc.f_aq_strength = x4->aq_strength = global_aq_strength_array[global_gop];
 			x264_encoder_reconfig(x4->enc, &x4->params);
-	        printf("ost->frames_encoded %d global_gop %d crf %f aq_strength %f\n",
-				ost->frames_encoded, global_gop, global_crf_array[global_gop], global_aq_strength_array[global_gop]);	
+	        //printf("ost->frames_encoded %d global_gop %d crf %f aq_strength %f\n",
+			//	ost->frames_encoded, global_gop, global_crf_array[global_gop], global_aq_strength_array[global_gop]);	
         }
 
         ret = avcodec_send_frame(enc, in_picture);
@@ -5603,8 +5616,9 @@ static int encode_prepare(InputStreamInfo *p_input_stream_info, EncodeInfo *p_en
 
     av_opt_set(p_enc_info->codecCtx->priv_data, "profile", "high",   0);
     av_opt_set(p_enc_info->codecCtx->priv_data, "preset",  "medium", 0);
-	if (tune_flag)
+	if (tune_flag) {
     	av_opt_set(p_enc_info->codecCtx->priv_data, "tune",    "ssim",   0);
+	}
 
     // open the encoder
     if (avcodec_open2(p_enc_info->codecCtx, p_enc_info->codec, NULL) < 0) {
@@ -6570,8 +6584,9 @@ static float get_aq_strength(float pixel_unsharpness)
 }
 
 //decode the mp4 format h264 codec to yuv,
-static int FristPartofPreProcess(char *filename, int fps)
+static int EaglePreProcess(char *filename)
 {
+	int fps = 0;
 	int end_of_file = 0;
 	const char *fmt = "yuv420p";
 	char *log_file = "./log_test.txt";
@@ -6705,9 +6720,9 @@ static int FristPartofPreProcess(char *filename, int fps)
         return ret;
     }
 	//printf("p_input_stream_info %p\n", p_input_stream_info);
-	//printf("avg_frame_rate %d %d\n", p_input_stream_info->p_fmt_ctx->streams[0]->avg_frame_rate.den,
-	//	p_input_stream_info->p_fmt_ctx->streams[0]->avg_frame_rate.num);
-	//exit(0);
+	fps = ceil((float)p_input_stream_info->p_fmt_ctx->streams[0]->avg_frame_rate.num / (float)p_input_stream_info->p_fmt_ctx->streams[0]->avg_frame_rate.den);
+	printf("avg_frame_rate %d %d fps %d\n", p_input_stream_info->p_fmt_ctx->streams[0]->avg_frame_rate.den,
+		p_input_stream_info->p_fmt_ctx->streams[0]->avg_frame_rate.num, fps);
 
     if ((ret = open_codecs_and_contexts(&p_input_stream_info)) != 0) {
         fprintf(stderr, "Eagle: oepn codec and contexts fail\n");
@@ -7177,23 +7192,66 @@ NEXT:
 	return ret;
 }
 
+static int EagleParseParam(int argc, char **argv)
+{
+	int ret_arg = 0;
+	for (int i = 0; i < argc; i++) {
+		if (!strcmp(argv[i], "-i"))         {ret_arg = i + 1;i++;}
+		if (!strcmp(argv[i], "-preset"))    {argv[i + 1] = "medium";  i++;}
+		if (!strcmp(argv[i], "-tune"))      {argv[i + 1] = "ssim";    i++;}
+		if (!strcmp(argv[i], "-profile:v")) {argv[i + 1] = "high";    i++;}
+		if (!strcmp(argv[i], "-c:v"))		{argv[i + 1]  = "libx264"; i++;}
+		if (!strcmp(argv[i], "-b:v"))		{printf("cannot set the bitrate param\n");exit(1);}
+	}
+
+	return ret_arg;
+}
+
 int main(int argc, char **argv)
 {
     int i, ret;
+	int eagle_argc = 0;
     BenchmarkTimeStamps ti;
 	struct timeval start, end;
 	gettimeofday(&start, NULL);
-	printf("start the fristPartofPreProcess, argv[1] %s fps %s %f\n", argv[1], argv[12], atof(argv[12]));
-    //TODO:The first process is to get the target_vmaf and sharpness value for each segment
-    FristPartofPreProcess(argv[2], ceil(atof(argv[12])));
+	//TODO:The first process is to get the target_vmaf and sharpness value for each segment
+	ret = EagleParseParam(argc, argv);
+	char **eagle_argv = (char *)malloc((argc + 10) * (sizeof(int)) * sizeof(char *));
+	for (int i = 0; i < argc; i++) {
+		eagle_argv[i] = (char *)malloc(strlen(argv[i]) + 1);
+		memcpy(eagle_argv[i], argv[i], strlen(argv[i]) + 1);
+	}
+	eagle_argv[argc] = (char *)malloc(strlen("-vf") + 1);
+	memcpy(eagle_argv[argc], "-vf", strlen("-vf") + 1);
+	eagle_argv[argc + 1] = (char *)malloc(strlen("unsharp=5:5:1.0") + 1);
+	memcpy(eagle_argv[argc + 1], "unsharp=5:5:1.0", strlen("unsharp=5:5:1.0") + 1);
+
+	eagle_argv[argc + 2] = (char *)malloc(strlen("-c:v") + 1);
+	memcpy(eagle_argv[argc + 2], "-c:v", strlen("-c:v") + 1);
+	eagle_argv[argc + 3] = (char *)malloc(strlen("libx264") + 1);
+	memcpy(eagle_argv[argc + 3], "libx264", strlen("libx264") + 1);
+
+	eagle_argv[argc + 4] = (char *)malloc(strlen("-profile:v") + 1);
+	memcpy(eagle_argv[argc + 4], "-profile:v", strlen("-profile:v") + 1);
+	eagle_argv[argc + 5] = (char *)malloc(strlen("high") + 1);
+	memcpy(eagle_argv[argc + 5], "high", strlen("high") + 1);
+
+	eagle_argv[argc + 6] = (char *)malloc(strlen("-preset") + 1);
+	memcpy(eagle_argv[argc + 6], "-preset", strlen("-preset") + 1);
+	eagle_argv[argc + 7] = (char *)malloc(strlen("medium") + 1);
+	memcpy(eagle_argv[argc + 7], "medium", strlen("medium") + 1);
+
+	eagle_argv[argc + 8] = (char *)malloc(strlen("-tune") + 1);
+	memcpy(eagle_argv[argc + 8], "-tune", strlen("-tune") + 1);
+	eagle_argv[argc + 9] = (char *)malloc(strlen("ssim") + 1);
+	memcpy(eagle_argv[argc + 9], "ssim", strlen("ssim") + 1);
+
+	eagle_argc = argc + 10;
+
+    EaglePreProcess(argv[ret]);
+
 	gettimeofday(&end, NULL);
 	printf("interval = %ld\n", 1000000*(end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec));
-
-	for (int i = 0; i <= 406; i++) {
-		printf("after preprocess gop_num %d target_score %f crf %f unsharp %f aq_strength %f\n",
-			i, global_target_score_array[i], global_crf_array[i], global_unsharp_array[i], global_aq_strength_array[i]);
-	}
-    //return 0;
 
     init_dynload();
 
@@ -7202,25 +7260,24 @@ int main(int argc, char **argv)
     setvbuf(stderr,NULL,_IONBF,0); /* win32 runtime needs this */
 
     av_log_set_flags(AV_LOG_SKIP_REPEATED);
-    parse_loglevel(argc, argv, options);
+    parse_loglevel(eagle_argc, eagle_argv, options);
 
-    if(argc>1 && !strcmp(argv[1], "-d")){
+    if(eagle_argc>1 && !strcmp(eagle_argv[1], "-d")){
         run_as_daemon=1;
         av_log_set_callback(log_callback_null);
-        argc--;
-        argv++;
+        eagle_argc--;
+        eagle_argv++;
     }
-	printf("fun %s line %d\n", __FUNCTION__, __LINE__);
 
 #if CONFIG_AVDEVICE
     avdevice_register_all();
 #endif
     avformat_network_init();
 
-    show_banner(argc, argv, options);
+    show_banner(eagle_argc, eagle_argv, options);
 
     /* parse options and open all input/output files */
-    ret = ffmpeg_parse_options(argc, argv);
+    ret = ffmpeg_parse_options(eagle_argc, eagle_argv);
     if (ret < 0)
         exit_program(1);
 
@@ -7229,7 +7286,6 @@ int main(int argc, char **argv)
         av_log(NULL, AV_LOG_WARNING, "Use -h to get full help or, even better, run 'man %s'\n", program_name);
         exit_program(1);
     }
-	printf("fun %s line %d\n", __FUNCTION__, __LINE__);
 
     /* file converter / grab */
     if (nb_output_files <= 0) {
@@ -7243,10 +7299,9 @@ int main(int argc, char **argv)
     }
 
     current_time = ti = get_benchmark_time_stamps();
-	printf("fun %s line %d\n", __FUNCTION__, __LINE__);
     if (transcode() < 0)
         exit_program(1);
-	printf("fun %s line %d\n", __FUNCTION__, __LINE__);
+
     if (do_benchmark) {
         int64_t utime, stime, rtime;
         current_time = get_benchmark_time_stamps();
@@ -7257,7 +7312,6 @@ int main(int argc, char **argv)
                "bench: utime=%0.3fs stime=%0.3fs rtime=%0.3fs\n",
                utime / 1000000.0, stime / 1000000.0, rtime / 1000000.0);
     }
-	printf("fun %s line %d\n", __FUNCTION__, __LINE__);
     av_log(NULL, AV_LOG_DEBUG, "%"PRIu64" frames successfully decoded, %"PRIu64" decoding errors\n",
            decode_error_stat[0], decode_error_stat[1]);
     if ((decode_error_stat[0] + decode_error_stat[1]) * max_error_rate < decode_error_stat[1])
